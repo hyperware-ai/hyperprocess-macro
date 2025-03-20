@@ -646,6 +646,7 @@ wit_bindgen::generate!({
 ```
 
 Note: The `wit` files will always get generated with `hyper-bindgen`, which you have to call before `kit b`. More info [in the hyper-bindgen repository](https://github.com/hyperware-ai/hyper-bindgen).
+```rust
 struct Component;
 impl Guest for Component {
     fn init(_our: String) {
@@ -689,13 +690,11 @@ impl Guest for Component {
         }
     }
 }
+
 ```
 
 
 
-## Todos
-
-- Let the new kit templates make use of the new framework
 
 
 
@@ -874,3 +873,7 @@ graph TB
     style AsyncFlow fill:#222222,stroke:#FF6600,color:#ffffff
 ```
 
+
+## Todos
+
+- Let the new kit templates make use of the new framework

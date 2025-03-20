@@ -694,11 +694,7 @@ impl Guest for Component {
 ```
 
 
-
-
-
-
-Here is an overly complex llm generated graph that looks cool, delete if you want. 
+Here is an overly complex llm generated graph that looks cool.
 
 ```mermaid
 graph TB

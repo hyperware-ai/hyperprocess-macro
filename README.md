@@ -3,7 +3,6 @@
 ![How it feels to use Hyperware](hyperware.jpg)
 How it feels to use hyperware
 
-
 ## Table of Contents
 
 - [Part 1: User Guide](#part-1-user-guide)
@@ -16,16 +15,16 @@ How it feels to use hyperware
     - [Init Method](#init-method)
     - [WebSocket Handler](#websocket-handler)
   - [Binding Endpoints](#binding-endpoints)
-    - [HTTP Configuration](#http-binding-configuration)
-    - [WebSocket Configuration](#websocket-binding-configuration)
+    - [HTTP Binding Configuration](#http-binding-configuration)
+    - [WebSocket Binding Configuration](#websocket-binding-configuration)
   - [Persistence Options](#persistence-options)
   - [Example Application](#example-application)
 - [Part 2: Technical Implementation](#part-2-technical-implementation)
   - [Architecture Overview](#architecture-overview)
   - [Macro Implementation](#macro-implementation)
-    - [Parsing Phase](#1-parsing-phase)
-    - [Metadata Collection](#2-metadata-collection)
-    - [Code Generation](#3-code-generation)
+    - [1. Parsing Phase](#1-parsing-phase)
+    - [2. Metadata Collection](#2-metadata-collection)
+    - [3. Code Generation](#3-code-generation)
   - [Request/Response Flow](#requestresponse-flow)
   - [Async Runtime](#async-runtime)
     - [ResponseFuture Implementation](#responsefuture-implementation)

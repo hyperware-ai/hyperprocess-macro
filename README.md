@@ -1,5 +1,9 @@
 # Hyperware Process Framework
 
+![How it feels to use Hyperware](hyperware.jpg)
+How it feels to use hyperware
+
+
 ## Table of Contents
 
 - [Part 1: User Guide](#part-1-user-guide)

@@ -698,3 +698,179 @@ export!(Component);
 
 - Let the new kit templates make use of the new framework
 - ...
+
+
+
+```mermaid
+graph TB
+    %% STYLE DEFINITIONS
+    classDef default fill:#333333,color:#ffffff,stroke:#444444,stroke-width:1px
+    classDef accent fill:#FF6600,color:#ffffff,stroke:#CC5500,stroke-width:2px
+    classDef mainflow fill:#444444,color:#ffffff,stroke:#666666,stroke-width:2px
+    classDef asyncflow fill:#2A2A2A,color:#ffffff,stroke:#444444,stroke-width:1px
+    classDef external fill:#222222,color:#ffffff,stroke:#444444,stroke-width:1px
+    classDef dataflow fill:#008CBA,color:#ffffff,stroke:#0077A3,stroke-width:1px
+    classDef annotation fill:none,color:#FF6600,stroke:none,stroke-width:0px
+    
+    %% BUILD PHASE - Where components are generated
+    subgraph BuildPhase["⚙️ BUILD PHASE"]
+        UserSrc[/"User Source Code
+        #[hyperprocess] macro
+        #[http], #[local], #[remote] methods"/]
+        
+        subgraph CodeGen["Code Generation Pipeline"]
+            direction TB
+            
+            HyperBindgen["hyper-bindgen CLI
+            Scans for #[hyperprocess]"]
+            
+            subgraph BindgenOutputs["hyper-bindgen Outputs"]
+                direction LR
+                WitFiles["WIT Files
+                WebAssembly Interfaces"]
+                CallerUtils["caller-utils Crate
+                Type-safe RPC Stubs"]
+                EnumStructs["Shared Enums & Structs
+                Cross-process types"]
+            end
+            
+            ProcMacro["hyperprocess Macro
+            AST Transformation"]
+            
+            subgraph MacroOutputs["Macro Generated Code"]
+                direction LR
+                ReqResEnums["Request/Response Enums
+                - Generated variants per handler
+                - Parameter & return mappings"]
+                
+                HandlerDisp["Handler Dispatch Logic
+                - HTTP/Local/Remote routing
+                - Async handler spawning
+                - Message serialization"]
+                
+                AsyncRuntime["Async Runtime Components
+                - ResponseFuture impl
+                - Correlation ID system
+                - Executor & task management"]
+                
+                MainLoop["Component Implementation
+                - Message loop
+                - Task polling
+                - Error handling"]
+            end
+        end
+        
+        %% Dev-time Connections
+        UserSrc --> HyperBindgen
+        UserSrc --> ProcMacro
+        HyperBindgen --> BindgenOutputs
+        ProcMacro --> MacroOutputs
+        
+        %% Final Compilation
+        MacroOutputs --> WasmComp["WebAssembly Component
+        WASI Preview 2"]
+        BindgenOutputs --> WasmComp
+    end
+    
+    %% RUNTIME PHASE - How processes execute
+    subgraph RuntimePhase["⚡ RUNTIME PHASE"]
+        subgraph Process["Process A"]
+            direction TB
+            
+            InMsg[/"Incoming Messages"/] --> MsgLoop["Message Loop
+            await_message()"]
+            
+            subgraph ProcessInternals["Process Internals"]
+                direction LR
+                
+                MsgLoop --> MsgRouter{"Message Router"}
+                MsgRouter -->|"HTTP"| HttpHandler["HTTP Handlers"]
+                MsgRouter -->|"Local"| LocalHandler["Local Handlers"]
+                MsgRouter -->|"Remote"| RemoteHandler["Remote Handlers"]
+                MsgRouter -->|"WebSocket"| WsHandler["WebSocket Handlers"]
+                MsgRouter -->|"Response"| RespHandler["Response Handler"]
+                
+                %% State management
+                HttpHandler & LocalHandler & RemoteHandler & WsHandler --> AppState[("Application State
+                SaveOptions::EveryMessage")]
+                
+                %% Async handling
+                RespHandler --> RespRegistry["Response Registry
+                correlation_id → response"]
+                
+                CallStub["RPC Stub Calls
+                e.g. increment_counter_rpc()"]
+            end
+            
+            %% Asynchronous execution
+            AppState -.->|"Persist"| Storage[(Persistent Storage)]
+            
+            MsgLoop -.->|"Poll Tasks"| Executor["Async Executor
+            poll_all_tasks()"]
+            
+            ProcessInternals -->|"Generate"| OutMsg[/"Outgoing Messages"/]
+        end
+        
+        %% External communication points
+        ExtClient1["HTTP Client"] & ExtClient2["WebSocket Client"] --> InMsg
+        OutMsg --> Process2["Process B"]
+        Process2 --> InMsg
+    end
+    
+    %% ASYNC FLOW - Detailed sequence of async communication
+    subgraph AsyncFlow["⚡ ASYNC MESSAGE EXCHANGE"]
+        direction LR
+        
+        AF1["1️⃣ Call RPC Stub
+        increment_counter_rpc(target, 42)"] --> 
+        AF2["2️⃣ Generate UUID
+        correlation_id = uuid::new_v4()"] --> 
+        AF3["3️⃣ Create Future
+        ResponseFuture(correlation_id)"] -->
+        AF4["4️⃣ Send Request
+        context=correlation_id"] -->
+        AF5["5️⃣ Target Process
+        Handle request & generate result"] -->
+        AF6["6️⃣ Send Response
+        context=correlation_id"] -->
+        AF7["7️⃣ Message Loop
+        Receives response with correlation_id"] -->
+        AF8["8️⃣ Response Registry
+        Store response by correlation_id"] -->
+        AF9["9️⃣ Future Polling
+        ResponseFuture finds response and completes"]
+    end
+    
+    %% KEY CONNECTIONS BETWEEN SECTIONS
+    
+    %% Build to Runtime
+    WasmComp ==>|"Load Component"| Process
+    
+    %% Runtime to Async Flow
+    CallStub ==>|"Initiates"| AF1
+    AF9 ==>|"Resume Future in"| Executor
+    RespRegistry ===|"Powers"| AF8
+    
+    %% Annotation for the Correlation ID system
+    CorrelationNote["CORRELATION SYSTEM
+    Tracks request→response with UUIDs"] -.-> RespRegistry
+    
+    %% Style elements
+    class UserSrc,WitFiles,CallerUtils,EnumStructs,ReqResEnums,HandlerDisp,AsyncRuntime,MainLoop,WasmComp mainflow
+    class MsgLoop,Executor,RespRegistry,RespHandler,AF2,AF8 accent
+    class MsgRouter,HttpHandler,LocalHandler,RemoteHandler,WsHandler,CallStub,AppState dataflow
+    class AF1,AF3,AF4,AF5,AF6,AF7,AF9 asyncflow
+    class ExtClient1,ExtClient2,Process2,Storage,InMsg,OutMsg external
+    class CorrelationNote annotation
+    
+    %% Subgraph styling
+    style BuildPhase fill:#171717,stroke:#333333,color:#ffffff
+    style CodeGen fill:#222222,stroke:#444444,color:#ffffff
+    style BindgenOutputs fill:#2A2A2A,stroke:#444444,color:#ffffff
+    style MacroOutputs fill:#2A2A2A,stroke:#444444,color:#ffffff
+    style RuntimePhase fill:#171717,stroke:#333333,color:#ffffff
+    style Process fill:#222222,stroke:#444444,color:#ffffff
+    style ProcessInternals fill:#2A2A2A,stroke:#444444,color:#ffffff
+    style AsyncFlow fill:#222222,stroke:#FF6600,color:#ffffff
+```
+

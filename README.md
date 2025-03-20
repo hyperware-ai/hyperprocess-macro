@@ -689,17 +689,17 @@ impl Guest for Component {
         }
     }
 }
-
-// Export the component for WASM
-export!(Component);
 ```
+
+
 
 ## Todos
 
 - Let the new kit templates make use of the new framework
-- ...
 
 
+
+Here is an overly complex llm generated graph that looks cool, delete if you want. 
 
 ```mermaid
 graph TB

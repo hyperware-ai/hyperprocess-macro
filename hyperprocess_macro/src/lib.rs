@@ -976,9 +976,7 @@ fn generate_message_handlers(
                         Err(e) => {
                             hyperware_process_lib::logging::warn!("Failed to deserialize remote request into Request enum: {}", e);
                             // Try to decode as UTF-8 for better debugging
-                            if let Ok(text) = std::str::from_utf8(message.body()) {
-                                hyperware_process_lib::logging::warn!("Raw request content: {}", text);
-                            }
+                            hyperware_process_lib::logging::warn!("Raw request value: {:?}", req_value);
                         }
                     }
                 },

@@ -60,14 +60,36 @@ struct HandlerGroups<'a> {
     local: Vec<&'a FunctionMetadata>,
     remote: Vec<&'a FunctionMetadata>,
     http: Vec<&'a FunctionMetadata>,
+    // New group for combined handlers (used for local messages that can also use remote handlers)
+    local_and_remote: Vec<&'a FunctionMetadata>,
 }
 
 impl<'a> HandlerGroups<'a> {
     fn from_function_metadata(metadata: &'a [FunctionMetadata]) -> Self {
+        // Collect handlers that are explicitly marked as local
+        let local: Vec<_> = metadata.iter().filter(|f| f.is_local).collect();
+        
+        // Collect handlers that are explicitly marked as remote
+        let remote: Vec<_> = metadata.iter().filter(|f| f.is_remote).collect();
+        
+        // Collect HTTP handlers
+        let http: Vec<_> = metadata.iter().filter(|f| f.is_http).collect();
+        
+        // Create a combined list of local and remote handlers for local messages
+        // We first include all local handlers, then add remote handlers that aren't already covered
+        let mut local_and_remote = local.clone();
+        for handler in remote.iter() {
+            // Check if this remote handler is already in the local_and_remote list
+            if !local_and_remote.iter().any(|h| h.variant_name == handler.variant_name) {
+                local_and_remote.push(handler);
+            }
+        }
+        
         HandlerGroups {
-            local: metadata.iter().filter(|f| f.is_local).collect(),
-            remote: metadata.iter().filter(|f| f.is_remote).collect(),
-            http: metadata.iter().filter(|f| f.is_http).collect(),
+            local,
+            remote,
+            http,
+            local_and_remote,
         }
     }
 }
@@ -77,6 +99,7 @@ struct HandlerDispatch {
     local: proc_macro2::TokenStream,
     remote: proc_macro2::TokenStream,
     http: proc_macro2::TokenStream,
+    local_and_remote: proc_macro2::TokenStream,
 }
 
 /// Init method details for code generation
@@ -846,6 +869,8 @@ fn generate_message_handlers(
     let http_request_match_arms = &handler_arms.http;
     let local_request_match_arms = &handler_arms.local;
     let remote_request_match_arms = &handler_arms.remote;
+    // We now use the combined local_and_remote handlers for local messages
+    let local_and_remote_request_match_arms = &handler_arms.local_and_remote;
 
     quote! {
         /// Handle messages from the HTTP server
@@ -938,12 +963,13 @@ fn generate_message_handlers(
         fn handle_local_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
             match serde_json::from_slice::<serde_json::Value>(message.body()) {
                 Ok(req_value) => {
-                    // Process the local request based on our handlers
+                    // Process the local request based on our handlers (now including both local and remote handlers)
                     match serde_json::from_value::<Request>(req_value.clone()) {
                         Ok(request) => {
                             unsafe {
                                 // Match on the request variant and call the appropriate handler
-                                #local_request_match_arms
+                                // Now using combined local_and_remote handlers
+                                #local_and_remote_request_match_arms
 
                                 // Save state if needed
                                 hyperware_app_common::maybe_save_state(&mut *state);
@@ -1208,6 +1234,8 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
         local: generate_handler_dispatch(&handlers.local, self_ty, HandlerType::Local),
         remote: generate_handler_dispatch(&handlers.remote, self_ty, HandlerType::Remote),
         http: generate_handler_dispatch(&handlers.http, self_ty, HandlerType::Http),
+        // Generate dispatch for combined local and remote handlers
+        local_and_remote: generate_handler_dispatch(&handlers.local_and_remote, self_ty, HandlerType::Local),
     };
 
     // Clean the implementation block

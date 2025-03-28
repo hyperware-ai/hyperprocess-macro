@@ -581,8 +581,9 @@ fn generate_enum_variant(
     params: &[syn::Type],
 ) -> proc_macro2::TokenStream {
     if params.is_empty() {
-        // Unit variant for functions with no parameters
-        quote! { #variant_name }
+        // Changed from unit variant to tuple variant with no elements
+        // for functions with no parameters
+        quote! { #variant_name() }
     } else if params.len() == 1 {
         // Simple tuple variant for single parameter
         let param_type = &params[0];
@@ -697,9 +698,9 @@ fn generate_async_handler_arm(
     response_handling: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     if func.params.is_empty() {
-        // Async function with no parameters
+        // Updated pattern to match tuple variant with no elements
         quote! {
-            Request::#variant_name => {
+            Request::#variant_name() => {
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
@@ -758,8 +759,9 @@ fn generate_sync_handler_arm(
     response_handling: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     if func.params.is_empty() {
+        // Updated pattern to match tuple variant with no elements
         quote! {
-            Request::#variant_name => {
+            Request::#variant_name() => {
                 let result = unsafe { (*state).#fn_name() };
                 #response_handling
             }

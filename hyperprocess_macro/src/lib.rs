@@ -68,23 +68,26 @@ impl<'a> HandlerGroups<'a> {
     fn from_function_metadata(metadata: &'a [FunctionMetadata]) -> Self {
         // Collect handlers that are explicitly marked as local
         let local: Vec<_> = metadata.iter().filter(|f| f.is_local).collect();
-        
+
         // Collect handlers that are explicitly marked as remote
         let remote: Vec<_> = metadata.iter().filter(|f| f.is_remote).collect();
-        
+
         // Collect HTTP handlers
         let http: Vec<_> = metadata.iter().filter(|f| f.is_http).collect();
-        
+
         // Create a combined list of local and remote handlers for local messages
         // We first include all local handlers, then add remote handlers that aren't already covered
         let mut local_and_remote = local.clone();
         for handler in remote.iter() {
             // Check if this remote handler is already in the local_and_remote list
-            if !local_and_remote.iter().any(|h| h.variant_name == handler.variant_name) {
+            if !local_and_remote
+                .iter()
+                .any(|h| h.variant_name == handler.variant_name)
+            {
                 local_and_remote.push(handler);
             }
         }
-        
+
         HandlerGroups {
             local,
             remote,
@@ -556,13 +559,13 @@ fn generate_request_response_enums(
         return (quote! {}, quote! {});
     }
 
-    // Request enum variants
+    // HPMRequest enum variants
     let request_variants = function_metadata.iter().map(|func| {
         let variant_name = format_ident!("{}", &func.variant_name);
         generate_enum_variant(&variant_name, &func.params)
     });
 
-    // Response enum variants
+    // HPMResponse enum variants
     let response_variants = function_metadata.iter().map(|func| {
         let variant_name = format_ident!("{}", &func.variant_name);
 
@@ -585,13 +588,13 @@ fn generate_request_response_enums(
     (
         quote! {
             #[derive(Debug, serde::Serialize, serde::Deserialize)]
-            enum Request {
+            enum HPMRequest {
                 #(#request_variants),*
             }
         },
         quote! {
             #[derive(Debug, serde::Serialize, serde::Deserialize)]
-            enum Response {
+            enum HPMResponse {
                 #(#response_variants),*
             }
         },
@@ -692,7 +695,7 @@ fn generate_response_handling(
     match handler_type {
         HandlerType::Local | HandlerType::Remote => {
             quote! {
-                // Instead of wrapping in Response enum, directly serialize the result
+                // Instead of wrapping in HPMResponse enum, directly serialize the result
                 let resp = hyperware_process_lib::Response::new()
                     .body(serde_json::to_vec(&result).unwrap());
                 resp.send().unwrap();
@@ -700,7 +703,7 @@ fn generate_response_handling(
         }
         HandlerType::Http => {
             quote! {
-                // Instead of wrapping in Response enum, directly serialize the result
+                // Instead of wrapping in HPMResponse enum, directly serialize the result
                 let response_bytes = serde_json::to_vec(&result).unwrap();
                 hyperware_process_lib::http::server::send_response(
                     hyperware_process_lib::http::StatusCode::OK,
@@ -723,7 +726,7 @@ fn generate_async_handler_arm(
     if func.params.is_empty() {
         // Updated pattern to match struct variant with no fields
         quote! {
-            Request::#variant_name{} => {
+            HPMRequest::#variant_name{} => {
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
@@ -736,7 +739,7 @@ fn generate_async_handler_arm(
     } else if func.params.len() == 1 {
         // Async function with a single parameter
         quote! {
-            Request::#variant_name(param) => {
+            HPMRequest::#variant_name(param) => {
                 let param_captured = param;  // Capture param before moving into async block
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
@@ -759,7 +762,7 @@ fn generate_async_handler_arm(
         let captured_names = (0..param_count).map(|i| format_ident!("param{}_captured", i));
 
         quote! {
-            Request::#variant_name(#(#param_names),*) => {
+            HPMRequest::#variant_name(#(#param_names),*) => {
                 // Capture all parameters before moving into async block
                 #(#capture_statements)*
                 // Create a raw pointer to state for use in the async block
@@ -784,14 +787,14 @@ fn generate_sync_handler_arm(
     if func.params.is_empty() {
         // Updated pattern to match struct variant with no fields
         quote! {
-            Request::#variant_name{} => {
+            HPMRequest::#variant_name{} => {
                 let result = unsafe { (*state).#fn_name() };
                 #response_handling
             }
         }
     } else if func.params.len() == 1 {
         quote! {
-            Request::#variant_name(param) => {
+            HPMRequest::#variant_name(param) => {
                 let result = unsafe { (*state).#fn_name(param) };
                 #response_handling
             }
@@ -802,7 +805,7 @@ fn generate_sync_handler_arm(
         let param_names2 = param_names.clone();
 
         quote! {
-            Request::#variant_name(#(#param_names),*) => {
+            HPMRequest::#variant_name(#(#param_names),*) => {
                 let result = unsafe { (*state).#fn_name(#(#param_names2),*) };
                 #response_handling
             }
@@ -898,7 +901,7 @@ fn generate_message_handlers(
                             // Process HTTP request
                             match serde_json::from_slice::<serde_json::Value>(blob.bytes()) {
                                 Ok(req_value) => {
-                                    match serde_json::from_value::<Request>(req_value.clone()) {
+                                    match serde_json::from_value::<HPMRequest>(req_value.clone()) {
                                         Ok(request) => {
                                             // Handle the HTTP request
                                             unsafe {
@@ -909,7 +912,7 @@ fn generate_message_handlers(
                                             }
                                         },
                                         Err(e) => {
-                                            hyperware_process_lib::logging::warn!("Failed to deserialize HTTP request into Request enum: {}", e);
+                                            hyperware_process_lib::logging::warn!("Failed to deserialize HTTP request into HPMRequest enum: {}", e);
                                             hyperware_process_lib::http::server::send_response(
                                                 hyperware_process_lib::http::StatusCode::BAD_REQUEST,
                                                 None,
@@ -964,7 +967,7 @@ fn generate_message_handlers(
             match serde_json::from_slice::<serde_json::Value>(message.body()) {
                 Ok(req_value) => {
                     // Process the local request based on our handlers (now including both local and remote handlers)
-                    match serde_json::from_value::<Request>(req_value.clone()) {
+                    match serde_json::from_value::<HPMRequest>(req_value.clone()) {
                         Ok(request) => {
                             unsafe {
                                 // Match on the request variant and call the appropriate handler
@@ -976,7 +979,7 @@ fn generate_message_handlers(
                             }
                         },
                         Err(e) => {
-                            hyperware_process_lib::logging::warn!("Failed to deserialize local request into Request enum: {}", e);
+                            hyperware_process_lib::logging::warn!("Failed to deserialize local request into HPMRequest enum: {}", e);
                         }
                     }
                 },
@@ -991,7 +994,7 @@ fn generate_message_handlers(
             match serde_json::from_slice::<serde_json::Value>(message.body()) {
                 Ok(req_value) => {
                     // Process the remote request based on our handlers
-                    match serde_json::from_value::<Request>(req_value.clone()) {
+                    match serde_json::from_value::<HPMRequest>(req_value.clone()) {
                         Ok(request) => {
                             unsafe {
                                 // Match on the request variant and call the appropriate handler
@@ -1002,7 +1005,7 @@ fn generate_message_handlers(
                             }
                         },
                         Err(e) => {
-                            hyperware_process_lib::logging::warn!("Failed to deserialize remote request into Request enum: {}", e);
+                            hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}", e);
                             // Try to decode as UTF-8 for better debugging
                             hyperware_process_lib::logging::warn!("Raw request value: {:?}", req_value);
                         }
@@ -1226,7 +1229,7 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Filter functions by handler type
     let handlers = HandlerGroups::from_function_metadata(&function_metadata);
 
-    // Generate Request and Response enums
+    // Generate HPMRequest and HPMResponse enums
     let (request_enum, response_enum) = generate_request_response_enums(&function_metadata);
 
     // Generate handler match arms
@@ -1235,7 +1238,11 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
         remote: generate_handler_dispatch(&handlers.remote, self_ty, HandlerType::Remote),
         http: generate_handler_dispatch(&handlers.http, self_ty, HandlerType::Http),
         // Generate dispatch for combined local and remote handlers
-        local_and_remote: generate_handler_dispatch(&handlers.local_and_remote, self_ty, HandlerType::Local),
+        local_and_remote: generate_handler_dispatch(
+            &handlers.local_and_remote,
+            self_ty,
+            HandlerType::Local,
+        ),
     };
 
     // Clean the implementation block

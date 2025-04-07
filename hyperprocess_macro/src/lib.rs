@@ -878,10 +878,6 @@ fn generate_message_handlers(
     quote! {
         /// Handle messages from the HTTP server
         fn handle_http_server_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
-            CURRENT_MESSAGE.with(|cell| {
-                *cell.borrow_mut() = Some(message.clone());
-            });
-
             // Parse HTTP server request
             match serde_json::from_slice::<hyperware_process_lib::http::server::HttpServerRequest>(message.body()) {
                 Ok(http_server_request) => {
@@ -968,10 +964,6 @@ fn generate_message_handlers(
 
         /// Handle local messages
         fn handle_local_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
-            CURRENT_MESSAGE.with(|cell| {
-                *cell.borrow_mut() = Some(message.clone());
-            });
-
             match serde_json::from_slice::<serde_json::Value>(message.body()) {
                 Ok(req_value) => {
                     // Process the local request based on our handlers (now including both local and remote handlers)
@@ -999,10 +991,6 @@ fn generate_message_handlers(
 
         /// Handle remote messages
         fn handle_remote_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
-            CURRENT_MESSAGE.with(|cell| {
-                *cell.borrow_mut() = Some(message.clone());
-            });
-
             match serde_json::from_slice::<serde_json::Value>(message.body()) {
                 Ok(req_value) => {
                     // Process the remote request based on our handlers
@@ -1148,6 +1136,9 @@ fn generate_component_impl(
 
                     match hyperware_process_lib::await_message() {
                         Ok(message) => {
+                            CURRENT_MESSAGE.with(|cell| {
+                                *cell.borrow_mut() = Some(message.clone());
+                            });
                             match message {
                                 hyperware_process_lib::Message::Response {body, context, ..} => {
                                     // TODO: We need to update the callback handlers to make async work.

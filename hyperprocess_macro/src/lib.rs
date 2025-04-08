@@ -1086,6 +1086,7 @@ fn generate_component_impl(
                     .as_ref()
                     .expect("No message in current context")
                     .source()
+                    .clone()
             })
         }
 

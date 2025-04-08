@@ -427,9 +427,11 @@ fn analyze_methods(
     Option<syn::Ident>,    // init method
     Option<syn::Ident>,    // ws method
     Vec<FunctionMetadata>, // metadata for request/response methods
+    bool,                  // whether init method contains logging init
 )> {
     let mut init_method = None;
     let mut ws_method = None;
+    let mut has_init_logging = false;
     let mut function_metadata = Vec::new();
 
     for item in &impl_block.items {
@@ -459,6 +461,10 @@ fn analyze_methods(
                     ));
                 }
                 init_method = Some(ident);
+
+                // Check if init_method contains logging init
+                has_init_logging = contains_init_logging(method);
+
                 continue;
             }
 
@@ -499,7 +505,7 @@ fn analyze_methods(
         ));
     }
 
-    Ok((init_method, ws_method, function_metadata))
+    Ok((init_method, ws_method, function_metadata, has_init_logging))
 }
 
 /// Extract metadata from a function
@@ -545,6 +551,39 @@ fn extract_function_metadata(
         is_remote,
         is_http,
     }
+}
+
+/// Check if a method contains a call to init_logging
+fn contains_init_logging(method: &syn::ImplItemFn) -> bool {
+    let mut contains_logging = false;
+
+    // Visitor to find init_logging calls
+    struct LoggingVisitor {
+        found: bool,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for LoggingVisitor {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident == "init_logging")
+                    .unwrap_or(false)
+                {
+                    self.found = true;
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    // Visit the method body to find init_logging calls
+    let mut visitor = LoggingVisitor { found: false };
+    syn::visit::visit_block(&mut visitor, &method.block);
+
+    visitor.found
 }
 
 //------------------------------------------------------------------------------
@@ -1039,6 +1078,7 @@ fn generate_component_impl(
     init_method_details: &InitMethodDetails,
     ws_method_details: &WsMethodDetails,
     handler_arms: &HandlerDispatch,
+    has_init_logging: bool,
 ) -> proc_macro2::TokenStream {
     // Extract values from args for use in the quote macro
     let name = &args.name;
@@ -1073,6 +1113,21 @@ fn generate_component_impl(
 
     // Generate message handler functions
     let message_handlers = generate_message_handlers(self_ty, handler_arms, ws_method_call);
+
+    // Generate the logging initialization conditionally
+    let logging_init = if !has_init_logging {
+        quote! {
+            // Initialize logging
+            hyperware_process_lib::logging::init_logging(
+                hyperware_process_lib::logging::Level::DEBUG,
+                hyperware_process_lib::logging::Level::INFO,
+                None, Some((0, 0, 1, 1)), None
+            ).unwrap();
+        }
+    } else {
+        // Empty if init_method already does logging initialization
+        quote! {}
+    };
 
     quote! {
         thread_local! {
@@ -1127,12 +1182,7 @@ fn generate_component_impl(
                     hyperware_process_lib::homepage::add_to_homepage(app_name, app_icon, Some("/"), app_widget);
                 }
 
-                // Initialize logging
-                hyperware_process_lib::logging::init_logging(
-                    hyperware_process_lib::logging::Level::DEBUG,
-                    hyperware_process_lib::logging::Level::INFO,
-                    None, Some((0, 0, 1, 1)), None
-                ).unwrap();
+                #logging_init
 
                 // Setup server with endpoints
                 let mut server = hyperware_app_common::setup_server(ui_config.as_ref(), &endpoints);
@@ -1255,10 +1305,11 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
     let self_ty = &impl_block.self_ty;
 
     // Analyze the methods in the implementation block
-    let (init_method, ws_method, function_metadata) = match analyze_methods(&impl_block) {
-        Ok(methods) => methods,
-        Err(e) => return e.to_compile_error().into(),
-    };
+    let (init_method, ws_method, function_metadata, has_init_logging) =
+        match analyze_methods(&impl_block) {
+            Ok(methods) => methods,
+            Err(e) => return e.to_compile_error().into(),
+        };
 
     // Filter functions by handler type
     let handlers = HandlerGroups::from_function_metadata(&function_metadata);
@@ -1304,6 +1355,7 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
         &init_method_details,
         &ws_method_details,
         &handler_arms,
+        has_init_logging,
     )
     .into()
 }

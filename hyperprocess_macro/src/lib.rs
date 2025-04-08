@@ -1019,6 +1019,16 @@ fn generate_message_handlers(
     }
 }
 
+/// Helper function to determine if an Expr is "None"
+fn is_none_literal(expr: &Expr) -> bool {
+    if let Expr::Path(expr_path) = expr {
+        if let Some(ident) = expr_path.path.get_ident() {
+            return ident == "None";
+        }
+    }
+    false
+}
+
 /// Generate the full component implementation
 fn generate_component_impl(
     args: &HyperProcessArgs,
@@ -1047,7 +1057,13 @@ fn generate_component_impl(
     };
 
     let ui = match &args.ui {
-        Some(ui_expr) => quote! { Some(#ui_expr) },
+        Some(ui_expr) => {
+            if is_none_literal(ui_expr) {
+                quote! { None }
+            } else {
+                quote! { Some(#ui_expr) }
+            }
+        }
         None => quote! { None },
     };
 

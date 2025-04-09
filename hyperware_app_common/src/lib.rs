@@ -155,6 +155,45 @@ where
     return SendResult::DeserializationError(error_msg);
 }
 
+pub async fn send_rmp<R>(
+    request: Request,
+) -> SendResult<R>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let request = if request.timeout.is_some() {
+        request
+    } else {
+        request.expects_response(30)
+    };
+
+    let correlation_id = Uuid::new_v4().to_string();
+    if let Err(e) = request
+        .context(correlation_id.as_bytes().to_vec())
+        .send()
+    {
+        return SendResult::BuildError(e);
+    }
+
+    let response_bytes = ResponseFuture::new(correlation_id).await;
+    match rmp_serde::from_slice(&response_bytes) {
+        Ok(result) => return SendResult::Success(result),
+        Err(_) => match rmp_serde::from_slice::<SendErrorKind>(&response_bytes) {
+            Ok(kind) => match kind {
+                SendErrorKind::Offline => {
+                    return SendResult::Offline;
+                }
+                SendErrorKind::Timeout => {
+                    return SendResult::Timeout;
+                }
+            },
+            _ => {}
+        },
+    };
+    let error_msg = String::from_utf8_lossy(&response_bytes).into_owned();
+    return SendResult::DeserializationError(error_msg);
+}
+
 #[macro_export]
 macro_rules! hyper {
     ($($code:tt)*) => {

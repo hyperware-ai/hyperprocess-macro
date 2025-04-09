@@ -6,7 +6,8 @@ publish = false
 
 [dependencies]
 anyhow = "1.0"
-hyperware_process_lib = { version = "1.0.4", features = ["logging"] }
+#hyperware_process_lib = { version = "1.0.4", features = ["logging"] }
+hyperware_process_lib = { git = "https://github.com/hyperware-ai/process_lib", features = ["logging"], rev = "42feacc" }
 process_macros = "0.1.0"
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }

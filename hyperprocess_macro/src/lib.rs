@@ -427,9 +427,11 @@ fn analyze_methods(
     Option<syn::Ident>,    // init method
     Option<syn::Ident>,    // ws method
     Vec<FunctionMetadata>, // metadata for request/response methods
+    bool,                  // whether init method contains logging init
 )> {
     let mut init_method = None;
     let mut ws_method = None;
+    let mut has_init_logging = false;
     let mut function_metadata = Vec::new();
 
     for item in &impl_block.items {
@@ -459,6 +461,10 @@ fn analyze_methods(
                     ));
                 }
                 init_method = Some(ident);
+
+                // Check if init_method contains logging init
+                has_init_logging = contains_init_logging(method);
+
                 continue;
             }
 
@@ -499,7 +505,7 @@ fn analyze_methods(
         ));
     }
 
-    Ok((init_method, ws_method, function_metadata))
+    Ok((init_method, ws_method, function_metadata, has_init_logging))
 }
 
 /// Extract metadata from a function
@@ -545,6 +551,39 @@ fn extract_function_metadata(
         is_remote,
         is_http,
     }
+}
+
+/// Check if a method contains a call to init_logging
+fn contains_init_logging(method: &syn::ImplItemFn) -> bool {
+    let mut contains_logging = false;
+
+    // Visitor to find init_logging calls
+    struct LoggingVisitor {
+        found: bool,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for LoggingVisitor {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident == "init_logging")
+                    .unwrap_or(false)
+                {
+                    self.found = true;
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    // Visit the method body to find init_logging calls
+    let mut visitor = LoggingVisitor { found: false };
+    syn::visit::visit_block(&mut visitor, &method.block);
+
+    visitor.found
 }
 
 //------------------------------------------------------------------------------
@@ -899,34 +938,26 @@ fn generate_message_handlers(
                             };
 
                             // Process HTTP request
-                            match serde_json::from_slice::<serde_json::Value>(blob.bytes()) {
-                                Ok(req_value) => {
-                                    match serde_json::from_value::<HPMRequest>(req_value.clone()) {
-                                        Ok(request) => {
-                                            // Handle the HTTP request
-                                            unsafe {
-                                                #http_request_match_arms
+                            match serde_json::from_slice::<HPMRequest>(&blob.bytes) {
+                                Ok(request) => {
+                                    // Handle the HTTP request
+                                    unsafe {
+                                        #http_request_match_arms
 
-                                                // Save state if needed
-                                                hyperware_app_common::maybe_save_state(&mut *state);
-                                            }
-                                        },
-                                        Err(e) => {
-                                            hyperware_process_lib::logging::warn!("Failed to deserialize HTTP request into HPMRequest enum: {}", e);
-                                            hyperware_process_lib::http::server::send_response(
-                                                hyperware_process_lib::http::StatusCode::BAD_REQUEST,
-                                                None,
-                                                format!("Invalid request format: {}", e).into_bytes()
-                                            );
-                                        }
+                                        // Save state if needed
+                                        hyperware_app_common::maybe_save_state(&mut *state);
                                     }
                                 },
                                 Err(e) => {
-                                    hyperware_process_lib::logging::warn!("Failed to parse HTTP request as JSON: {}", e);
+                                    hyperware_process_lib::logging::warn!(
+                                        "Failed to deserialize HTTP request into HPMRequest enum: {}\n{:?}",
+                                        e,
+                                        serde_json::from_slice::<serde_json::Value>(&blob.bytes),
+                                    );
                                     hyperware_process_lib::http::server::send_response(
                                         hyperware_process_lib::http::StatusCode::BAD_REQUEST,
                                         None,
-                                        format!("Invalid JSON: {}", e).into_bytes()
+                                        format!("Invalid request format: {}", e).into_bytes()
                                     );
                                 }
                             }
@@ -1019,6 +1050,16 @@ fn generate_message_handlers(
     }
 }
 
+/// Helper function to determine if an Expr is "None"
+fn is_none_literal(expr: &Expr) -> bool {
+    if let Expr::Path(expr_path) = expr {
+        if let Some(ident) = expr_path.path.get_ident() {
+            return ident == "None";
+        }
+    }
+    false
+}
+
 /// Generate the full component implementation
 fn generate_component_impl(
     args: &HyperProcessArgs,
@@ -1029,6 +1070,7 @@ fn generate_component_impl(
     init_method_details: &InitMethodDetails,
     ws_method_details: &WsMethodDetails,
     handler_arms: &HandlerDispatch,
+    has_init_logging: bool,
 ) -> proc_macro2::TokenStream {
     // Extract values from args for use in the quote macro
     let name = &args.name;
@@ -1047,7 +1089,13 @@ fn generate_component_impl(
     };
 
     let ui = match &args.ui {
-        Some(ui_expr) => quote! { Some(#ui_expr) },
+        Some(ui_expr) => {
+            if is_none_literal(ui_expr) {
+                quote! { None }
+            } else {
+                quote! { Some(#ui_expr) }
+            }
+        }
         None => quote! { None },
     };
 
@@ -1058,7 +1106,37 @@ fn generate_component_impl(
     // Generate message handler functions
     let message_handlers = generate_message_handlers(self_ty, handler_arms, ws_method_call);
 
+    // Generate the logging initialization conditionally
+    let logging_init = if !has_init_logging {
+        quote! {
+            // Initialize logging
+            hyperware_process_lib::logging::init_logging(
+                hyperware_process_lib::logging::Level::DEBUG,
+                hyperware_process_lib::logging::Level::INFO,
+                None, Some((0, 0, 1, 1)), None
+            ).unwrap();
+        }
+    } else {
+        // Empty if init_method already does logging initialization
+        quote! {}
+    };
+
     quote! {
+        thread_local! {
+            static CURRENT_MESSAGE: std::cell::RefCell<Option<hyperware_process_lib::Message>> =
+                std::cell::RefCell::new(None);
+        }
+
+        fn source() -> hyperware_process_lib::Address {
+            CURRENT_MESSAGE.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .expect("No message in current context")
+                    .source()
+                    .clone()
+            })
+        }
+
         wit_bindgen::generate!({
             path: "target/wit",
             world: #wit_world,
@@ -1096,12 +1174,7 @@ fn generate_component_impl(
                     hyperware_process_lib::homepage::add_to_homepage(app_name, app_icon, Some("/"), app_widget);
                 }
 
-                // Initialize logging
-                hyperware_process_lib::logging::init_logging(
-                    hyperware_process_lib::logging::Level::DEBUG,
-                    hyperware_process_lib::logging::Level::INFO,
-                    None, Some((0, 0, 1, 1)), None
-                ).unwrap();
+                #logging_init
 
                 // Setup server with endpoints
                 let mut server = hyperware_app_common::setup_server(ui_config.as_ref(), &endpoints);
@@ -1122,6 +1195,9 @@ fn generate_component_impl(
 
                     match hyperware_process_lib::await_message() {
                         Ok(message) => {
+                            CURRENT_MESSAGE.with(|cell| {
+                                *cell.borrow_mut() = Some(message.clone());
+                            });
                             match message {
                                 hyperware_process_lib::Message::Response {body, context, ..} => {
                                     // TODO: We need to update the callback handlers to make async work.
@@ -1221,10 +1297,11 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
     let self_ty = &impl_block.self_ty;
 
     // Analyze the methods in the implementation block
-    let (init_method, ws_method, function_metadata) = match analyze_methods(&impl_block) {
-        Ok(methods) => methods,
-        Err(e) => return e.to_compile_error().into(),
-    };
+    let (init_method, ws_method, function_metadata, has_init_logging) =
+        match analyze_methods(&impl_block) {
+            Ok(methods) => methods,
+            Err(e) => return e.to_compile_error().into(),
+        };
 
     // Filter functions by handler type
     let handlers = HandlerGroups::from_function_metadata(&function_metadata);
@@ -1270,6 +1347,7 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
         &init_method_details,
         &ws_method_details,
         &handler_arms,
+        has_init_logging,
     )
     .into()
 }

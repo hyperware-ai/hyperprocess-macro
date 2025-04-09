@@ -1,12 +1,4 @@
 // this is hyperware_app_common
-use hyperware_process_lib::get_state;
-use hyperware_process_lib::logging::info;
-use hyperware_process_lib::Request;
-use hyperware_process_lib::SendErrorKind;
-use hyperware_process_lib::http::server::HttpServer;
-use hyperware_process_lib::BuildError;
-use serde::Deserialize;
-use serde::Serialize;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -15,11 +7,14 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures_util::task::noop_waker_ref;
+use hyperware_process_lib::{get_state, http, kiprintln, set_state, BuildError, LazyLoadBlob, Message,  Request, SendError, SendErrorKind};
+use hyperware_process_lib::logging::info;
+use hyperware_process_lib::http::server::HttpServer;
+use serde::Deserialize;
+use serde::Serialize;
 use uuid::Uuid;
 
-use hyperware_process_lib::{
-    http, kiprintln, set_state, LazyLoadBlob, Message, SendError,
-};
+pub use hyperware_process_lib;
 
 pub mod prelude {
     pub use crate::APP_CONTEXT;
@@ -127,8 +122,13 @@ pub async fn send<R>(
 where
     R: serde::de::DeserializeOwned,
 {
-    let correlation_id = Uuid::new_v4().to_string();
+    let request = if request.timeout.is_some() {
+        request
+    } else {
+        request.expects_response(30)
+    };
 
+    let correlation_id = Uuid::new_v4().to_string();
     if let Err(e) = request
         .context(correlation_id.as_bytes().to_vec())
         .send()
@@ -140,6 +140,45 @@ where
     match serde_json::from_slice(&response_bytes) {
         Ok(result) => return SendResult::Success(result),
         Err(_) => match serde_json::from_slice::<SendErrorKind>(&response_bytes) {
+            Ok(kind) => match kind {
+                SendErrorKind::Offline => {
+                    return SendResult::Offline;
+                }
+                SendErrorKind::Timeout => {
+                    return SendResult::Timeout;
+                }
+            },
+            _ => {}
+        },
+    };
+    let error_msg = String::from_utf8_lossy(&response_bytes).into_owned();
+    return SendResult::DeserializationError(error_msg);
+}
+
+pub async fn send_rmp<R>(
+    request: Request,
+) -> SendResult<R>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let request = if request.timeout.is_some() {
+        request
+    } else {
+        request.expects_response(30)
+    };
+
+    let correlation_id = Uuid::new_v4().to_string();
+    if let Err(e) = request
+        .context(correlation_id.as_bytes().to_vec())
+        .send()
+    {
+        return SendResult::BuildError(e);
+    }
+
+    let response_bytes = ResponseFuture::new(correlation_id).await;
+    match rmp_serde::from_slice(&response_bytes) {
+        Ok(result) => return SendResult::Success(result),
+        Err(_) => match rmp_serde::from_slice::<SendErrorKind>(&response_bytes) {
             Ok(kind) => match kind {
                 SendErrorKind::Offline => {
                     return SendResult::Offline;

@@ -938,34 +938,26 @@ fn generate_message_handlers(
                             };
 
                             // Process HTTP request
-                            match serde_json::from_slice::<serde_json::Value>(blob.bytes()) {
-                                Ok(req_value) => {
-                                    match serde_json::from_value::<HPMRequest>(req_value.clone()) {
-                                        Ok(request) => {
-                                            // Handle the HTTP request
-                                            unsafe {
-                                                #http_request_match_arms
+                            match serde_json::from_slice::<HPMRequest>(blob.bytes) {
+                                Ok(request) => {
+                                    // Handle the HTTP request
+                                    unsafe {
+                                        #http_request_match_arms
 
-                                                // Save state if needed
-                                                hyperware_app_common::maybe_save_state(&mut *state);
-                                            }
-                                        },
-                                        Err(e) => {
-                                            hyperware_process_lib::logging::warn!("Failed to deserialize HTTP request into HPMRequest enum: {}", e);
-                                            hyperware_process_lib::http::server::send_response(
-                                                hyperware_process_lib::http::StatusCode::BAD_REQUEST,
-                                                None,
-                                                format!("Invalid request format: {}", e).into_bytes()
-                                            );
-                                        }
+                                        // Save state if needed
+                                        hyperware_app_common::maybe_save_state(&mut *state);
                                     }
                                 },
                                 Err(e) => {
-                                    hyperware_process_lib::logging::warn!("Failed to parse HTTP request as JSON: {}", e);
+                                    hyperware_process_lib::logging::warn!(
+                                        "Failed to deserialize HTTP request into HPMRequest enum: {}\n{}",
+                                        e,
+                                        serde_json::from_slice::<serde_json::Value>(blob.bytes),
+                                    );
                                     hyperware_process_lib::http::server::send_response(
                                         hyperware_process_lib::http::StatusCode::BAD_REQUEST,
                                         None,
-                                        format!("Invalid JSON: {}", e).into_bytes()
+                                        format!("Invalid request format: {}", e).into_bytes()
                                     );
                                 }
                             }

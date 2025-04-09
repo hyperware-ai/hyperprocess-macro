@@ -938,7 +938,7 @@ fn generate_message_handlers(
                             };
 
                             // Process HTTP request
-                            match serde_json::from_slice::<HPMRequest>(blob.bytes) {
+                            match serde_json::from_slice::<HPMRequest>(&blob.bytes) {
                                 Ok(request) => {
                                     // Handle the HTTP request
                                     unsafe {
@@ -950,9 +950,9 @@ fn generate_message_handlers(
                                 },
                                 Err(e) => {
                                     hyperware_process_lib::logging::warn!(
-                                        "Failed to deserialize HTTP request into HPMRequest enum: {}\n{}",
+                                        "Failed to deserialize HTTP request into HPMRequest enum: {}\n{:?}",
                                         e,
-                                        serde_json::from_slice::<serde_json::Value>(blob.bytes),
+                                        serde_json::from_slice::<serde_json::Value>(&blob.bytes),
                                     );
                                     hyperware_process_lib::http::server::send_response(
                                         hyperware_process_lib::http::StatusCode::BAD_REQUEST,

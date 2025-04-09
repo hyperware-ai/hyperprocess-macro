@@ -122,8 +122,13 @@ pub async fn send<R>(
 where
     R: serde::de::DeserializeOwned,
 {
-    let correlation_id = Uuid::new_v4().to_string();
+    let request = if request.timeout.is_some() {
+        request
+    } else {
+        request.expects_response(30)
+    };
 
+    let correlation_id = Uuid::new_v4().to_string();
     if let Err(e) = request
         .context(correlation_id.as_bytes().to_vec())
         .send()

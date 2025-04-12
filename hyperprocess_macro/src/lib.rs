@@ -68,23 +68,26 @@ impl<'a> HandlerGroups<'a> {
     fn from_function_metadata(metadata: &'a [FunctionMetadata]) -> Self {
         // Collect handlers that are explicitly marked as local
         let local: Vec<_> = metadata.iter().filter(|f| f.is_local).collect();
-        
+
         // Collect handlers that are explicitly marked as remote
         let remote: Vec<_> = metadata.iter().filter(|f| f.is_remote).collect();
-        
+
         // Collect HTTP handlers
         let http: Vec<_> = metadata.iter().filter(|f| f.is_http).collect();
-        
+
         // Create a combined list of local and remote handlers for local messages
         // We first include all local handlers, then add remote handlers that aren't already covered
         let mut local_and_remote = local.clone();
         for handler in remote.iter() {
             // Check if this remote handler is already in the local_and_remote list
-            if !local_and_remote.iter().any(|h| h.variant_name == handler.variant_name) {
+            if !local_and_remote
+                .iter()
+                .any(|h| h.variant_name == handler.variant_name)
+            {
                 local_and_remote.push(handler);
             }
         }
-        
+
         HandlerGroups {
             local,
             remote,
@@ -1057,7 +1060,7 @@ fn generate_component_impl(
 
     quote! {
         wit_bindgen::generate!({
-            path: "target/wit",
+            path: "../target/wit",
             world: #wit_world,
             generate_unused_types: true,
             additional_derives: [serde::Deserialize, serde::Serialize, process_macros::SerdeJsonInto],
@@ -1235,7 +1238,11 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
         remote: generate_handler_dispatch(&handlers.remote, self_ty, HandlerType::Remote),
         http: generate_handler_dispatch(&handlers.http, self_ty, HandlerType::Http),
         // Generate dispatch for combined local and remote handlers
-        local_and_remote: generate_handler_dispatch(&handlers.local_and_remote, self_ty, HandlerType::Local),
+        local_and_remote: generate_handler_dispatch(
+            &handlers.local_and_remote,
+            self_ty,
+            HandlerType::Local,
+        ),
     };
 
     // Clean the implementation block

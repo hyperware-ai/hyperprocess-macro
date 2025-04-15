@@ -1138,7 +1138,7 @@ fn generate_component_impl(
         }
 
         wit_bindgen::generate!({
-            path: "target/wit",
+            path: "../target/wit",
             world: #wit_world,
             generate_unused_types: true,
             additional_derives: [serde::Deserialize, serde::Serialize, process_macros::SerdeJsonInto],

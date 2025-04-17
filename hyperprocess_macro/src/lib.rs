@@ -1227,8 +1227,8 @@ fn generate_component_impl(
                                 ..
                             } = error
                             {
-                                let correlation_id = context
-                                    .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                                let correlation_id = String::from_utf8_lossy(context)
+                                    .to_string()
                                     .unwrap_or_else(|| "no context".to_string());
 
                                 hyperware_app_common::RESPONSE_REGISTRY.with(|registry| {

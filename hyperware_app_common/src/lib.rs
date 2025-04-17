@@ -11,6 +11,7 @@ use hyperware_process_lib::logging::info;
 use hyperware_process_lib::http::server::HttpServer;
 use serde::Deserialize;
 use serde::Serialize;
+use thiserror::Error;
 use uuid::Uuid;
 
 pub use hyperware_process_lib;
@@ -106,9 +107,11 @@ impl Future for ResponseFuture {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Error)]
 pub enum AppSendError {
+    #[error("SendError: {0}")]
     SendError(SendError),
+    #[error("BuildError: {0}")]
     BuildError(BuildError),
 }
 

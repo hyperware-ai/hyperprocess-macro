@@ -1,5 +1,4 @@
 // this is hyperware_app_common
-use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
@@ -7,7 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures_util::task::noop_waker_ref;
-use hyperware_process_lib::{get_state, http, kiprintln, set_state, BuildError, LazyLoadBlob, Message,  Request, SendError, SendErrorKind};
+use hyperware_process_lib::{get_state, http, kiprintln, set_state, BuildError, LazyLoadBlob, Message,  Request, SendError};
 use hyperware_process_lib::logging::info;
 use hyperware_process_lib::http::server::HttpServer;
 use serde::Deserialize;
@@ -108,17 +107,12 @@ impl Future for ResponseFuture {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SendResult<R> {
-    Success(R),
-    Timeout,
-    Offline,
-    DeserializationError(String),
+pub enum AppSendError {
+    SendError(SendError),
     BuildError(BuildError),
 }
 
-pub async fn send<R>(
-    request: Request,
-) -> SendResult<R>
+pub async fn send<R>(request: Request) -> Result<R, AppSendError>
 where
     R: serde::de::DeserializeOwned,
 {
@@ -133,31 +127,20 @@ where
         .context(correlation_id.as_bytes().to_vec())
         .send()
     {
-        return SendResult::BuildError(e);
+        return Err(AppSendError::BuildError(e));
     }
 
     let response_bytes = ResponseFuture::new(correlation_id).await;
-    match serde_json::from_slice(&response_bytes) {
-        Ok(result) => return SendResult::Success(result),
-        Err(_) => match serde_json::from_slice::<SendErrorKind>(&response_bytes) {
-            Ok(kind) => match kind {
-                SendErrorKind::Offline => {
-                    return SendResult::Offline;
-                }
-                SendErrorKind::Timeout => {
-                    return SendResult::Timeout;
-                }
-            },
-            _ => {}
-        },
-    };
-    let error_msg = String::from_utf8_lossy(&response_bytes).into_owned();
-    return SendResult::DeserializationError(error_msg);
+    if let Ok(r) = serde_json::from_slice::<R>(&response_bytes) {
+        return Ok(r);
+    }
+
+    let e = serde_json::from_slice::<SendError>(&response_bytes)
+        .expect("Failed to deserialize response to send()");
+    return Err(AppSendError::SendError(e));
 }
 
-pub async fn send_rmp<R>(
-    request: Request,
-) -> SendResult<R>
+pub async fn send_rmp<R>(request: Request) -> Result<R, AppSendError>
 where
     R: serde::de::DeserializeOwned,
 {
@@ -172,26 +155,17 @@ where
         .context(correlation_id.as_bytes().to_vec())
         .send()
     {
-        return SendResult::BuildError(e);
+        return Err(AppSendError::BuildError(e));
     }
 
     let response_bytes = ResponseFuture::new(correlation_id).await;
-    match rmp_serde::from_slice(&response_bytes) {
-        Ok(result) => return SendResult::Success(result),
-        Err(_) => match rmp_serde::from_slice::<SendErrorKind>(&response_bytes) {
-            Ok(kind) => match kind {
-                SendErrorKind::Offline => {
-                    return SendResult::Offline;
-                }
-                SendErrorKind::Timeout => {
-                    return SendResult::Timeout;
-                }
-            },
-            _ => {}
-        },
-    };
-    let error_msg = String::from_utf8_lossy(&response_bytes).into_owned();
-    return SendResult::DeserializationError(error_msg);
+    if let Ok(r) = rmp_serde::from_slice::<R>(&response_bytes) {
+        return Ok(r);
+    }
+
+    let e = rmp_serde::from_slice::<SendError>(&response_bytes)
+        .expect("Failed to deserialize response to send()");
+    return Err(AppSendError::SendError(e));
 }
 
 #[macro_export]
@@ -348,29 +322,6 @@ pub fn pretty_print_send_error(error: &SendError) {
             .map(|s| format!("\"{}\"", s))
             .unwrap_or("None".to_string())
     );
-}
-
-pub fn handle_send_error<S: Any + serde::Serialize>(send_error: &SendError, _user_state: &mut S) {
-    // Print the error
-    pretty_print_send_error(send_error);
-
-    // If this is a timeout and we have a context (correlation_id), resolve the future with None
-    if let SendError {
-        kind,
-        context: Some(context),
-        ..
-    } = send_error
-    {
-        // Convert context bytes to correlation_id string
-        if let Ok(correlation_id) = String::from_utf8(context.to_vec()) {
-            // Serialize None as the response
-            let none_response = serde_json::to_vec(kind).unwrap();
-
-            RESPONSE_REGISTRY.with(|registry| {
-                registry.borrow_mut().insert(correlation_id, none_response);
-            });
-        }
-    }
 }
 
 // For demonstration, we'll define them all in one place.

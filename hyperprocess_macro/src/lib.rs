@@ -1199,8 +1199,7 @@ fn generate_component_impl(
                                 *cell.borrow_mut() = Some(message.clone());
                             });
                             match message {
-                                hyperware_process_lib::Message::Response {body, context, ..} => {
-                                    // TODO: We need to update the callback handlers to make async work.
+                                hyperware_process_lib::Message::Response { body, context, .. } => {
                                     let correlation_id = context
                                         .as_deref()
                                         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
@@ -1222,48 +1221,21 @@ fn generate_component_impl(
                                 }
                             }
                         },
-                        Err(error) => {
-                            let kind = &error.kind;
-                            let target = &error.target;
-                            let body = String::from_utf8(error.message.body().to_vec())
-                                .map(|s| format!("\"{}\"", s))
-                                .unwrap_or_else(|_| format!("{:?}", error.message.body()));
-                            let context = error
-                                .context
-                                .as_ref()
-                                .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
-
-                            hyperware_process_lib::kiprintln!(
-                                "SendError {{
-                            kind: {:?},
-                            target: {},
-                            body: {},
-                            context: {}
-                        }}",
-                                kind,
-                                target,
-                                body,
-                                context
-                                    .map(|s| format!("\"{}\"", s))
-                                    .unwrap_or("None".to_string())
-                            );
-
+                        Err(ref error) => {
                             if let hyperware_process_lib::SendError {
-                                kind,
                                 context: Some(context),
                                 ..
-                            } = &error
+                            } = error
                             {
-                                // Convert context bytes to correlation_id string
-                                if let Ok(correlation_id) = String::from_utf8(context.to_vec()) {
-                                    // Serialize None as the response
-                                    let none_response = serde_json::to_vec(kind).unwrap();
+                                let correlation_id = context
+                                    .as_deref()
+                                    .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                                    .unwrap_or_else(|| "no context".to_string());
 
-                                    hyperware_app_common::RESPONSE_REGISTRY.with(|registry| {
-                                        let mut registry_mut = registry.borrow_mut();
-                                        registry_mut.insert(correlation_id, none_response);
-                                    });
-                                }
+                                hyperware_app_common::RESPONSE_REGISTRY.with(|registry| {
+                                    let mut registry_mut = registry.borrow_mut();
+                                    registry_mut.insert(correlation_id, serde_json::to_vec(error).unwrap());
+                                });
                             }
 
                         }

@@ -1201,7 +1201,7 @@ fn generate_component_impl(
                             match message {
                                 hyperware_process_lib::Message::Response { body, context, .. } => {
                                     let correlation_id = context
-                                        .as_deref()
+                                        .as_ref()
                                         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
                                         .unwrap_or_else(|| "no context".to_string());
 
@@ -1228,7 +1228,7 @@ fn generate_component_impl(
                             } = error
                             {
                                 let correlation_id = context
-                                    .as_deref()
+                                    .as_ref()
                                     .map(|bytes| String::from_utf8_lossy(bytes).to_string())
                                     .unwrap_or_else(|| "no context".to_string());
 

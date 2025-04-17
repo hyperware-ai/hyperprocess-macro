@@ -1144,6 +1144,7 @@ fn generate_component_impl(
             additional_derives: [serde::Deserialize, serde::Serialize, process_macros::SerdeJsonInto],
         });
 
+        use hyperware_app_common::hyperware_process_lib as hyperware_process_lib;
         use hyperware_process_lib::http::server::HttpBindingConfig;
         use hyperware_process_lib::http::server::WsBindingConfig;
         use hyperware_app_common::Binding;

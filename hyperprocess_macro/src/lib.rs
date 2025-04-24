@@ -995,55 +995,39 @@ fn generate_message_handlers(
 
         /// Handle local messages
         fn handle_local_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
-            match serde_json::from_slice::<serde_json::Value>(message.body()) {
-                Ok(req_value) => {
-                    // Process the local request based on our handlers (now including both local and remote handlers)
-                    match serde_json::from_value::<HPMRequest>(req_value.clone()) {
-                        Ok(request) => {
-                            unsafe {
-                                // Match on the request variant and call the appropriate handler
-                                // Now using combined local_and_remote handlers
-                                #local_and_remote_request_match_arms
+            // Process the local request based on our handlers (now including both local and remote handlers)
+            match serde_json::from_slice::<HPMRequest>(message.body()) {
+                Ok(request) => {
+                    unsafe {
+                        // Match on the request variant and call the appropriate handler
+                        // Now using combined local_and_remote handlers
+                        #local_and_remote_request_match_arms
 
-                                // Save state if needed
-                                hyperware_app_common::maybe_save_state(&mut *state);
-                            }
-                        },
-                        Err(e) => {
-                            hyperware_process_lib::logging::warn!("Failed to deserialize local request into HPMRequest enum: {}", e);
-                        }
+                        // Save state if needed
+                        hyperware_app_common::maybe_save_state(&mut *state);
                     }
                 },
                 Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to parse message body as JSON: {}", e);
+                    hyperware_process_lib::logging::warn!("Failed to deserialize local request into HPMRequest enum: {}", e);
                 }
             }
         }
 
         /// Handle remote messages
         fn handle_remote_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
-            match serde_json::from_slice::<serde_json::Value>(message.body()) {
-                Ok(req_value) => {
-                    // Process the remote request based on our handlers
-                    match serde_json::from_value::<HPMRequest>(req_value.clone()) {
-                        Ok(request) => {
-                            unsafe {
-                                // Match on the request variant and call the appropriate handler
-                                #remote_request_match_arms
+            // Process the remote request based on our handlers
+            match serde_json::from_slice::<HPMRequest>(message.body()) {
+                Ok(request) => {
+                    unsafe {
+                        // Match on the request variant and call the appropriate handler
+                        #remote_request_match_arms
 
-                                // Save state if needed
-                                hyperware_app_common::maybe_save_state(&mut *state);
-                            }
-                        },
-                        Err(e) => {
-                            hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}", e);
-                            // Try to decode as UTF-8 for better debugging
-                            hyperware_process_lib::logging::warn!("Raw request value: {:?}", req_value);
-                        }
+                        // Save state if needed
+                        hyperware_app_common::maybe_save_state(&mut *state);
                     }
                 },
                 Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to parse message body as JSON: {}", e);
+                    hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}\nRaw request value: {:?}", e, message.body());
                 }
             }
         }

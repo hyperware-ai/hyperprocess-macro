@@ -1027,7 +1027,7 @@ fn generate_message_handlers(
                     }
                 },
                 Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}\nRaw request value: {:?}", e, req_value);
+                    hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}\nRaw request value: {:?}", e, message.body());
                 }
             }
         }
@@ -1191,7 +1191,6 @@ fn generate_component_impl(
                                         .unwrap_or_else(|| "no context".to_string());
 
                                     hyperware_app_common::RESPONSE_REGISTRY.with(|registry| {
-                                        println!("corid {correlation_id}: added response body {body:?}");
                                         let mut registry_mut = registry.borrow_mut();
                                         registry_mut.insert(correlation_id, body);
                                     });

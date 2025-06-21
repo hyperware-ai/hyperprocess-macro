@@ -29,6 +29,7 @@ thread_local! {
         current_path: None,
         current_server: None,
         current_message: None,
+        http_method: None,
     });
 
     pub static RESPONSE_REGISTRY: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
@@ -40,6 +41,7 @@ pub struct AppContext {
     pub current_path: Option<String>,
     pub current_server: Option<*mut HttpServer>,
     pub current_message: Option<Message>,
+    pub http_method: Option<http::Method>,
 }
 
 // Access function for the current path
@@ -61,6 +63,16 @@ pub fn source() -> hyperware_process_lib::Address {
             .expect("No message in current context")
             .source()
             .clone()
+    })
+}
+
+// Access function for the HTTP method of the current request
+pub fn http_method() -> http::Method {
+    APP_CONTEXT.with(|ctx| {
+        ctx.borrow()
+            .http_method
+            .clone()
+            .expect("No HTTP method in current context")
     })
 }
 

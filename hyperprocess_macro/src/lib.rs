@@ -923,7 +923,9 @@ fn generate_message_handlers(
                     match http_server_request {
                         hyperware_process_lib::http::server::HttpServerRequest::Http(http_request) => {
                             hyperware_app_common::APP_CONTEXT.with(|ctx| {
-                                ctx.borrow_mut().current_path = Some(http_request.path().clone().expect("Failed to get path from HTTP request"));
+                                let mut ctx_mut = ctx.borrow_mut();
+                                ctx_mut.current_path = Some(http_request.path().clone().expect("Failed to get path from HTTP request"));
+                                ctx_mut.http_method = http_request.method().clone();
                             });
 
                             // Get the blob containing the actual request
@@ -962,8 +964,10 @@ fn generate_message_handlers(
                                 }
                             }
                             hyperware_app_common::APP_CONTEXT.with(|ctx| {
-                                ctx.borrow_mut().current_path = None;
-                                ctx.borrow_mut().current_message = None;
+                                let mut ctx_mut = ctx.borrow_mut();
+                                ctx_mut.current_path = None;
+                                ctx_mut.current_message = None;
+                                ctx_mut.http_method = None;
                             });
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {

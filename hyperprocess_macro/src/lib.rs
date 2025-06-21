@@ -922,7 +922,7 @@ fn generate_message_handlers(
                 Ok(http_server_request) => {
                     match http_server_request {
                         hyperware_process_lib::http::server::HttpServerRequest::Http(http_request) => {
-                            hyperware_app_common::APP_HELPER.with(|ctx| {
+                            hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 ctx.borrow_mut().current_path = Some(http_request.path().clone().expect("Failed to get path from HTTP request"));
                             });
 
@@ -961,7 +961,7 @@ fn generate_message_handlers(
                                     );
                                 }
                             }
-                            hyperware_app_common::APP_HELPER.with(|ctx| {
+                            hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 ctx.borrow_mut().current_path = None;
                             });
                         },
@@ -1163,7 +1163,7 @@ fn generate_component_impl(
 
                 // Setup server with endpoints
                 let mut server = hyperware_app_common::setup_server(ui_config.as_ref(), &endpoints);
-                hyperware_app_common::APP_HELPER.with(|ctx| {
+                hyperware_app_common::APP_HELPERS.with(|ctx| {
                     ctx.borrow_mut().current_server = Some(&mut server);
                 });
 
@@ -1180,7 +1180,7 @@ fn generate_component_impl(
 
                     match hyperware_process_lib::await_message() {
                         Ok(message) => {
-                            hyperware_app_common::APP_HELPER.with(|ctx| {
+                            hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 ctx.borrow_mut().current_message = Some(message.clone());
                             });
                             match message {

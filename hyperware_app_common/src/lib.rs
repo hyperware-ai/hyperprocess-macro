@@ -26,28 +26,49 @@ thread_local! {
     pub static APP_CONTEXT: RefCell<AppContext> = RefCell::new(AppContext {
         hidden_state: None,
         executor: Executor::new(),
-        current_path: None,
-        current_server: None,
     });
 
     pub static RESPONSE_REGISTRY: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
+
+
+    pub static APP_HELPERS: RefCell<AppHelpers> = RefCell::new(AppHelpers {
+        current_path: None,
+        current_server: None,
+        current_message: None,
+    });
 }
 
 pub struct AppContext {
     pub hidden_state: Option<HiddenState>,
     pub executor: Executor,
+}
+
+pub struct AppHelpers {
     pub current_path: Option<String>,
     pub current_server: Option<*mut HttpServer>,
+    pub current_message: Option<Message>,
 }
 
 // Access function for the current path
 pub fn get_path() -> Option<String> {
-    APP_CONTEXT.with(|ctx| ctx.borrow().current_path.clone())
+    APP_HELPERS.with(|ctx| ctx.borrow().current_path.clone())
 }
 
 // Access function for the current server
 pub fn get_server() -> Option<&'static mut HttpServer> {
-    APP_CONTEXT.with(|ctx| ctx.borrow().current_server.map(|ptr| unsafe { &mut *ptr }))
+    APP_HELPERS.with(|ctx| ctx.borrow().current_server.map(|ptr| unsafe { &mut *ptr }))
+}
+
+// Access function for the source address of the current message
+pub fn source() -> hyperware_process_lib::Address {
+    APP_HELPERS.with(|ctx| {
+        ctx.borrow()
+            .current_message
+            .as_ref()
+            .expect("No message in current context")
+            .source()
+            .clone()
+    })
 }
 
 pub struct Executor {

@@ -224,11 +224,13 @@ fn clean_impl_block(impl_block: &ItemImpl) -> ItemImpl {
 
 /// Check if a method has a valid self receiver (&mut self)
 fn has_valid_self_receiver(method: &syn::ImplItemFn) -> bool {
-    method
-        .sig
-        .inputs
-        .first()
-        .map_or(false, |arg| matches!(arg, syn::FnArg::Receiver(_)))
+    match method.sig.inputs.first() {
+        Some(syn::FnArg::Receiver(receiver)) => {
+            // Must be &mut self, not self, &self, Box<Self>, etc.
+            receiver.reference.is_some() && receiver.mutability.is_some()
+        }
+        _ => false,
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -307,7 +309,7 @@ fn validate_init_method(method: &syn::ImplItemFn) -> syn::Result<()> {
     if !has_valid_self_receiver(method) {
         return Err(syn::Error::new_spanned(
             &method.sig,
-            "Init method must take &mut self as first parameter",
+            "Init method must take &mut self as first and only parameter",
         ));
     }
 
@@ -505,6 +507,22 @@ fn analyze_methods(
         ));
     }
 
+    // Check for duplicate handler names (which would create duplicate enum variants)
+    let mut seen_variants = std::collections::HashSet::new();
+    for func in &function_metadata {
+        if !seen_variants.insert(&func.variant_name) {
+            return Err(syn::Error::new_spanned(
+                &impl_block,
+                format!(
+                    "Multiple handlers would generate the same enum variant '{}'. \
+                    This usually happens when you have methods with the same name but different cases (e.g., 'getUser' and 'get_user'). \
+                    Please rename one of the methods to avoid conflicts.",
+                    func.variant_name
+                ),
+            ));
+        }
+    }
+
     Ok((init_method, ws_method, function_metadata, has_init_logging))
 }
 
@@ -676,7 +694,7 @@ fn generate_handler_dispatch(
             HandlerType::Http => "No HTTP handlers defined but received an HTTP request",
         };
         return quote! {
-            hyperware_process_lib::logging::warn!(#message);
+            hyperware_process_lib::logging::error!(#message);
         };
     }
 
@@ -692,8 +710,16 @@ fn generate_handler_dispatch(
 
     // Add an explicit unreachable for other variants
     let unreachable_arm = quote! {
-        _ => unreachable!(concat!("Non-", #type_name, " request variant received in ", #type_name, " handler"))
+        _ => {
+            hyperware_process_lib::logging::error!(
+                "Received {} request variant that doesn't have a corresponding {} handler. \
+                This usually means you're sending a request type that doesn't match the handler attributes.",
+                stringify!(request),
+                #type_name
+            );
+        }
     };
+
 
     quote! {
         match request {
@@ -735,20 +761,54 @@ fn generate_response_handling(
         HandlerType::Local | HandlerType::Remote => {
             quote! {
                 // Instead of wrapping in HPMResponse enum, directly serialize the result
-                let resp = hyperware_process_lib::Response::new()
-                    .body(serde_json::to_vec(&result).unwrap());
-                resp.send().unwrap();
+                match serde_json::to_vec(&result) {
+                    Ok(response_bytes) => {
+                        let resp = hyperware_process_lib::Response::new()
+                            .body(response_bytes);
+                        if let Err(e) = resp.send() {
+                            hyperware_process_lib::logging::error!(
+                                "Failed to send {} response: {:?}",
+                                #type_name,
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        hyperware_process_lib::logging::error!(
+                            "Failed to serialize {} handler response for variant {}: {}",
+                            #type_name,
+                            stringify!(#variant_name),
+                            e
+                        );
+                    }
+                }
             }
         }
         HandlerType::Http => {
             quote! {
                 // Instead of wrapping in HPMResponse enum, directly serialize the result
-                let response_bytes = serde_json::to_vec(&result).unwrap();
-                hyperware_process_lib::http::server::send_response(
-                    hyperware_process_lib::http::StatusCode::OK,
-                    None,
-                    response_bytes
-                );
+                match serde_json::to_vec(&result) {
+                    Ok(response_bytes) => {
+                        hyperware_process_lib::http::server::send_response(
+                            hyperware_process_lib::http::StatusCode::OK,
+                            None,
+                            response_bytes
+                        );
+                    }
+                    Err(e) => {
+                        hyperware_process_lib::logging::error!(
+                            "Failed to serialize HTTP handler response for variant {}: {}. \
+                            This usually means the return type doesn't implement Serialize trait.",
+                            stringify!(#variant_name),
+                            e
+                        );
+                        hyperware_process_lib::http::server::send_response(
+                            hyperware_process_lib::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            None,
+                            format!("Serialization error: {}", e).into_bytes()
+                        );
+                    }
+                }
             }
         }
     }
@@ -928,7 +988,10 @@ fn generate_message_handlers(
 
                             // Get the blob containing the actual request
                             let Some(blob) = message.blob() else {
-                                hyperware_process_lib::logging::warn!("Failed to get blob for HTTP, sending BAD_REQUEST");
+                                hyperware_process_lib::logging::error!(
+                                    "Failed to get blob for HTTP request. \
+                                    The HTTP request appears to be missing its payload."
+                                );
                                 hyperware_process_lib::http::server::send_response(
                                     hyperware_process_lib::http::StatusCode::BAD_REQUEST,
                                     None,
@@ -949,11 +1012,28 @@ fn generate_message_handlers(
                                     }
                                 },
                                 Err(e) => {
-                                    hyperware_process_lib::logging::warn!(
-                                        "Failed to deserialize HTTP request into HPMRequest enum: {}\n{:?}",
-                                        e,
-                                        serde_json::from_slice::<serde_json::Value>(&blob.bytes),
+                                    hyperware_process_lib::logging::error!(
+                                        "Failed to deserialize HTTP request into HPMRequest enum: {}",
+                                        e
                                     );
+                                    
+                                    // Try to parse as generic JSON to provide more helpful error info
+                                    match serde_json::from_slice::<serde_json::Value>(&blob.bytes) {
+                                        Ok(json_value) => {
+                                            hyperware_process_lib::logging::error!(
+                                                "Received JSON: {}. \
+                                                Make sure the request matches one of your handler parameter types.",
+                                                serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| "invalid".to_string())
+                                            );
+                                        }
+                                        Err(_) => {
+                                            hyperware_process_lib::logging::error!(
+                                                "Request body is not valid JSON. Received {} bytes of data.",
+                                                blob.bytes.len()
+                                            );
+                                        }
+                                    }
+                                    
                                     hyperware_process_lib::http::server::send_response(
                                         hyperware_process_lib::http::StatusCode::BAD_REQUEST,
                                         None,
@@ -967,7 +1047,11 @@ fn generate_message_handlers(
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
                             let Some(blob) = message.blob() else {
-                                hyperware_process_lib::logging::warn!("Failed to get blob for WebSocketPush, exiting");
+                                hyperware_process_lib::logging::error!(
+                                    "Failed to get blob for WebSocketPush on channel {}. \
+                                    The WebSocket message appears to be missing its payload.",
+                                    channel_id
+                                );
                                 return;
                             };
 
@@ -980,15 +1064,41 @@ fn generate_message_handlers(
                             }
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketOpen { path, channel_id } => {
-                            hyperware_app_common::get_server().unwrap().handle_websocket_open(&path, channel_id);
+                            match hyperware_app_common::get_server() {
+                                Some(server) => {
+                                    server.handle_websocket_open(&path, channel_id);
+                                }
+                                None => {
+                                    hyperware_process_lib::logging::error!(
+                                        "Failed to get server instance for WebSocket open on channel {} at path {}.",
+                                        channel_id,
+                                        path
+                                    );
+                                }
+                            }
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketClose(channel_id) => {
-                            hyperware_app_common::get_server().unwrap().handle_websocket_close(channel_id);
+                            match hyperware_app_common::get_server() {
+                                Some(server) => {
+                                    server.handle_websocket_close(channel_id);
+                                }
+                                None => {
+                                    hyperware_process_lib::logging::error!(
+                                        "Failed to get server instance for WebSocket close on channel {}.
+                                        No websocket connection to close.",
+                                        channel_id
+                                    );
+                                }
+                            }
                         }
                     }
                 },
                 Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to parse HTTP server request: {}", e);
+                    hyperware_process_lib::logging::error!(
+                        "Failed to parse HTTP server request: {}. \
+                        This might indicate a protocol mismatch with the HTTP server.",
+                        e
+                    );
                 }
             }
         }
@@ -1008,7 +1118,29 @@ fn generate_message_handlers(
                     }
                 },
                 Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to deserialize local request into HPMRequest enum: {}", e);
+                    hyperware_process_lib::logging::error!(
+                        "Failed to deserialize local request into HPMRequest enum: {}",
+                        e
+                    );
+                    
+                    // Try to parse as generic JSON to provide more helpful error info
+                    match serde_json::from_slice::<serde_json::Value>(message.body()) {
+                        Ok(json_value) => {
+                            hyperware_process_lib::logging::error!(
+                                "Received JSON from {}: {}. \
+                                Make sure the request matches one of your handler parameter types.",
+                                message.source(),
+                                serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| "invalid".to_string())
+                            );
+                        }
+                        Err(_) => {
+                            hyperware_process_lib::logging::error!(
+                                "Request body from {} is not valid JSON. Received {} bytes of data.",
+                                message.source(),
+                                message.body().len()
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1027,7 +1159,29 @@ fn generate_message_handlers(
                     }
                 },
                 Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}\nRaw request value: {:?}", e, message.body());
+                    hyperware_process_lib::logging::error!(
+                        "Failed to deserialize remote request into HPMRequest enum: {}",
+                        e
+                    );
+                    
+                    // Try to parse as generic JSON to provide more helpful error info
+                    match serde_json::from_slice::<serde_json::Value>(message.body()) {
+                        Ok(json_value) => {
+                            hyperware_process_lib::logging::error!(
+                                "Received JSON from {}: {}. \
+                                Make sure the request matches one of your handler parameter types.",
+                                message.source(),
+                                serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| "invalid".to_string())
+                            );
+                        }
+                        Err(_) => {
+                            hyperware_process_lib::logging::error!(
+                                "Request body from {} is not valid JSON. Received {} bytes of data.",
+                                message.source(),
+                                message.body().len()
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1094,11 +1248,14 @@ fn generate_component_impl(
     let logging_init = if !has_init_logging {
         quote! {
             // Initialize logging
-            hyperware_process_lib::logging::init_logging(
+            if let Err(e) = hyperware_process_lib::logging::init_logging(
                 hyperware_process_lib::logging::Level::DEBUG,
                 hyperware_process_lib::logging::Level::INFO,
                 None, Some((0, 0, 1, 1)), None
-            ).unwrap();
+            ) {
+                // We can't use error! here because logging isn't initialized yet
+                eprintln!("Failed to initialize logging: {}. Continuing without logging.", e);
+            }
         }
     } else {
         // Empty if init_method already does logging initialization
@@ -1115,7 +1272,7 @@ fn generate_component_impl(
             CURRENT_MESSAGE.with(|cell| {
                 cell.borrow()
                     .as_ref()
-                    .expect("No message in current context")
+                    .expect("source() called without a current message context. This function should only be called during message handling.")
                     .source()
                     .clone()
             })
@@ -1217,7 +1374,18 @@ fn generate_component_impl(
 
                                 hyperware_app_common::RESPONSE_REGISTRY.with(|registry| {
                                     let mut registry_mut = registry.borrow_mut();
-                                    registry_mut.insert(correlation_id, serde_json::to_vec(error).unwrap());
+                                    match serde_json::to_vec(error) {
+                                        Ok(error_bytes) => {
+                                            registry_mut.insert(correlation_id, error_bytes);
+                                        }
+                                        Err(e) => {
+                                            hyperware_process_lib::logging::error!(
+                                                "Failed to serialize SendError for correlation ID {}: {}.",
+                                                correlation_id,
+                                                e
+                                            );
+                                        }
+                                    }
                                 });
                             }
 

@@ -963,6 +963,7 @@ fn generate_message_handlers(
                             }
                             hyperware_app_common::APP_CONTEXT.with(|ctx| {
                                 ctx.borrow_mut().current_path = None;
+                                ctx.borrow_mut().current_message = None;
                             });
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
@@ -991,6 +992,10 @@ fn generate_message_handlers(
                     hyperware_process_lib::logging::warn!("Failed to parse HTTP server request: {}", e);
                 }
             }
+            // Clear current message after handling
+            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                ctx.borrow_mut().current_message = None;
+            });
         }
 
         /// Handle local messages
@@ -1011,6 +1016,10 @@ fn generate_message_handlers(
                     hyperware_process_lib::logging::warn!("Failed to deserialize local request into HPMRequest enum: {}", e);
                 }
             }
+            // Clear current message after handling
+            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                ctx.borrow_mut().current_message = None;
+            });
         }
 
         /// Handle remote messages
@@ -1030,6 +1039,10 @@ fn generate_message_handlers(
                     hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}\nRaw request value: {:?}", e, message.body());
                 }
             }
+            // Clear current message after handling
+            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                ctx.borrow_mut().current_message = None;
+            });
         }
     }
 }
@@ -1106,21 +1119,6 @@ fn generate_component_impl(
     };
 
     quote! {
-        thread_local! {
-            static CURRENT_MESSAGE: std::cell::RefCell<Option<hyperware_process_lib::Message>> =
-                std::cell::RefCell::new(None);
-        }
-
-        fn source() -> hyperware_process_lib::Address {
-            CURRENT_MESSAGE.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .expect("No message in current context")
-                    .source()
-                    .clone()
-            })
-        }
-
         wit_bindgen::generate!({
             path: "../target/wit",
             world: #wit_world,
@@ -1180,8 +1178,8 @@ fn generate_component_impl(
 
                     match hyperware_process_lib::await_message() {
                         Ok(message) => {
-                            CURRENT_MESSAGE.with(|cell| {
-                                *cell.borrow_mut() = Some(message.clone());
+                            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                                ctx.borrow_mut().current_message = Some(message.clone());
                             });
                             match message {
                                 hyperware_process_lib::Message::Response { body, context, .. } => {

@@ -28,7 +28,6 @@ thread_local! {
         executor: Executor::new(),
         current_path: None,
         current_server: None,
-        current_message: None,
     });
 
     pub static RESPONSE_REGISTRY: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
@@ -39,7 +38,6 @@ pub struct AppContext {
     pub executor: Executor,
     pub current_path: Option<String>,
     pub current_server: Option<*mut HttpServer>,
-    pub current_message: Option<Message>,
 }
 
 // Access function for the current path
@@ -50,18 +48,6 @@ pub fn get_path() -> Option<String> {
 // Access function for the current server
 pub fn get_server() -> Option<&'static mut HttpServer> {
     APP_CONTEXT.with(|ctx| ctx.borrow().current_server.map(|ptr| unsafe { &mut *ptr }))
-}
-
-// Access function for the source address of the current message
-pub fn source() -> hyperware_process_lib::Address {
-    APP_CONTEXT.with(|ctx| {
-        ctx.borrow()
-            .current_message
-            .as_ref()
-            .expect("No message in current context")
-            .source()
-            .clone()
-    })
 }
 
 pub struct Executor {

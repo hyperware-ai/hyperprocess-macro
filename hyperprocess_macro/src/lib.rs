@@ -922,7 +922,7 @@ fn generate_message_handlers(
                 Ok(http_server_request) => {
                     match http_server_request {
                         hyperware_process_lib::http::server::HttpServerRequest::Http(http_request) => {
-                            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                            hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 let mut ctx_mut = ctx.borrow_mut();
                                 ctx_mut.current_path = Some(http_request.path().clone().expect("Failed to get path from HTTP request"));
                                 ctx_mut.http_method = http_request.method().clone();
@@ -963,10 +963,9 @@ fn generate_message_handlers(
                                     );
                                 }
                             }
-                            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                            hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 let mut ctx_mut = ctx.borrow_mut();
                                 ctx_mut.current_path = None;
-                                ctx_mut.current_message = None;
                                 ctx_mut.http_method = None;
                             });
                         },
@@ -996,10 +995,6 @@ fn generate_message_handlers(
                     hyperware_process_lib::logging::warn!("Failed to parse HTTP server request: {}", e);
                 }
             }
-            // Clear current message after handling
-            hyperware_app_common::APP_CONTEXT.with(|ctx| {
-                ctx.borrow_mut().current_message = None;
-            });
         }
 
         /// Handle local messages
@@ -1020,10 +1015,6 @@ fn generate_message_handlers(
                     hyperware_process_lib::logging::warn!("Failed to deserialize local request into HPMRequest enum: {}", e);
                 }
             }
-            // Clear current message after handling
-            hyperware_app_common::APP_CONTEXT.with(|ctx| {
-                ctx.borrow_mut().current_message = None;
-            });
         }
 
         /// Handle remote messages
@@ -1043,10 +1034,6 @@ fn generate_message_handlers(
                     hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}\nRaw request value: {:?}", e, message.body());
                 }
             }
-            // Clear current message after handling
-            hyperware_app_common::APP_CONTEXT.with(|ctx| {
-                ctx.borrow_mut().current_message = None;
-            });
         }
     }
 }
@@ -1165,7 +1152,7 @@ fn generate_component_impl(
 
                 // Setup server with endpoints
                 let mut server = hyperware_app_common::setup_server(ui_config.as_ref(), &endpoints);
-                hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                hyperware_app_common::APP_HELPERS.with(|ctx| {
                     ctx.borrow_mut().current_server = Some(&mut server);
                 });
 
@@ -1182,7 +1169,7 @@ fn generate_component_impl(
 
                     match hyperware_process_lib::await_message() {
                         Ok(message) => {
-                            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                            hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 ctx.borrow_mut().current_message = Some(message.clone());
                             });
                             match message {

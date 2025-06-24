@@ -35,6 +35,7 @@ thread_local! {
         current_path: None,
         current_server: None,
         current_message: None,
+        current_http_method: None,
     });
 }
 
@@ -47,6 +48,7 @@ pub struct AppHelpers {
     pub current_path: Option<String>,
     pub current_server: Option<*mut HttpServer>,
     pub current_message: Option<Message>,
+    pub current_http_method: Option<String>,
 }
 
 

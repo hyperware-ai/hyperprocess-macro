@@ -1147,7 +1147,7 @@ fn generate_message_handlers(
                             hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 let mut ctx_mut = ctx.borrow_mut();
                                 ctx_mut.current_path = Some(http_request.path().clone().expect("Failed to get path from HTTP request"));
-                                ctx_mut.http_method = http_request.method().to_string();
+                                ctx_mut.current_http_method = Some(http_request.method().to_string());
                                 // TODO: Add query params and any other needed fields
                                 //ctx_mut.http_query_params = http_request.query_params.clone();
                             });

@@ -49,6 +49,7 @@ pub struct AppHelpers {
     pub current_message: Option<Message>,
 }
 
+
 // Access function for the current path
 pub fn get_path() -> Option<String> {
     APP_HELPERS.with(|ctx| ctx.borrow().current_path.clone())
@@ -68,6 +69,25 @@ pub fn source() -> hyperware_process_lib::Address {
             .expect("No message in current context")
             .source()
             .clone()
+    })
+}
+
+/// Get query parameters from the current HTTP request path
+/// Returns None if not in an HTTP context or no query parameters present
+pub fn get_query_params() -> Option<HashMap<String, String>> {
+    get_path().map(|path| {
+        let mut params = HashMap::new();
+        if let Some(query_start) = path.find('?') {
+            let query = &path[query_start + 1..];
+            for pair in query.split('&') {
+                if let Some(eq_pos) = pair.find('=') {
+                    let key = pair[..eq_pos].to_string();
+                    let value = pair[eq_pos + 1..].to_string();
+                    params.insert(key, value);
+                }
+            }
+        }
+        params
     })
 }
 

@@ -45,6 +45,8 @@ struct FunctionMetadata {
     is_local: bool,                 // Has #[local] attribute
     is_remote: bool,                // Has #[remote] attribute
     is_http: bool,                  // Has #[http] attribute
+    http_methods: Vec<String>,      // HTTP methods this handler accepts (GET, POST, etc.)
+    http_path: Option<String>,      // Specific path this handler is bound to (optional)
 }
 
 /// Enum for the different handler types
@@ -203,6 +205,104 @@ fn has_attribute(method: &syn::ImplItemFn, attr_name: &str) -> bool {
         .attrs
         .iter()
         .any(|attr| attr.path().is_ident(attr_name))
+}
+
+/// Parse HTTP methods and path from the #[http] attribute
+/// Supports: #[http], #[http(method = "GET")], #[http(method = "POST", path = "/api")]
+fn parse_http_attributes(method: &syn::ImplItemFn) -> (Vec<String>, Option<String>) {
+    for attr in &method.attrs {
+        if attr.path().is_ident("http") {
+            // Handle #[http] with no arguments - defaults to ALL methods
+            if matches!(&attr.meta, syn::Meta::Path(_)) {
+                return (vec![
+                    "GET".to_string(),
+                    "POST".to_string(),
+                    "PUT".to_string(),
+                    "DELETE".to_string(),
+                    "PATCH".to_string(),
+                    "HEAD".to_string(),
+                    "OPTIONS".to_string(),
+                ], None);
+            }
+            
+            // Handle #[http(method = "GET", path = "/api")]
+            if let syn::Meta::List(list) = &attr.meta {
+                let mut methods = None;
+                let mut path = None;
+                
+                // Parse the token stream manually
+                let tokens: Vec<_> = list.tokens.clone().into_iter().collect();
+                let mut i = 0;
+                
+                while i < tokens.len() {
+                    // Look for identifier (method or path)
+                    if let proc_macro2::TokenTree::Ident(ident) = &tokens[i] {
+                        let ident_str = ident.to_string();
+                        
+                        // Check for = sign
+                        if i + 2 < tokens.len() {
+                            if let proc_macro2::TokenTree::Punct(punct) = &tokens[i + 1] {
+                                if punct.as_char() == '=' {
+                                    // Get the string literal
+                                    if let proc_macro2::TokenTree::Literal(lit) = &tokens[i + 2] {
+                                        let lit_str = lit.to_string();
+                                        // Remove quotes from the literal
+                                        let value = lit_str.trim_matches('"');
+                                        
+                                        if ident_str == "method" {
+                                            let method = value.to_uppercase();
+                                            if matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS") {
+                                                methods = Some(vec![method]);
+                                            }
+                                        } else if ident_str == "path" {
+                                            path = Some(value.to_string());
+                                        }
+                                    }
+                                    i += 3; // Skip ident, =, and literal
+                                    
+                                    // Skip comma if present
+                                    if i < tokens.len() {
+                                        if let proc_macro2::TokenTree::Punct(punct) = &tokens[i] {
+                                            if punct.as_char() == ',' {
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+                
+                // Default to ALL methods if none specified
+                let final_methods = methods.unwrap_or_else(|| vec![
+                    "GET".to_string(),
+                    "POST".to_string(),
+                    "PUT".to_string(),
+                    "DELETE".to_string(),
+                    "PATCH".to_string(),
+                    "HEAD".to_string(),
+                    "OPTIONS".to_string(),
+                ]);
+                
+                return (final_methods, path);
+            }
+            
+            // Default to ALL methods if parsing fails
+            return (vec![
+                "GET".to_string(),
+                "POST".to_string(),
+                "PUT".to_string(),
+                "DELETE".to_string(),
+                "PATCH".to_string(),
+                "HEAD".to_string(),
+                "OPTIONS".to_string(),
+            ], None);
+        }
+    }
+    (Vec::new(), None)
 }
 
 /// Remove our custom attributes from the implementation block
@@ -541,6 +641,13 @@ fn extract_function_metadata(
     // Create variant name (snake_case to CamelCase)
     let variant_name = to_camel_case(&ident.to_string());
 
+    // Parse HTTP attributes if this is an HTTP handler
+    let (http_methods, http_path) = if is_http {
+        parse_http_attributes(method)
+    } else {
+        (Vec::new(), None)
+    };
+
     FunctionMetadata {
         name: ident,
         variant_name,
@@ -550,6 +657,8 @@ fn extract_function_metadata(
         is_local,
         is_remote,
         is_http,
+        http_methods,
+        http_path,
     }
 }
 
@@ -902,17 +1011,48 @@ fn ws_method_opt_to_call(ws_method: &Option<syn::Ident>) -> proc_macro2::TokenSt
     }
 }
 
-/// Generate handler functions for message types
+/// Generate message handler functions for message types
 fn generate_message_handlers(
     self_ty: &Box<syn::Type>,
     handler_arms: &HandlerDispatch,
     ws_method_call: &proc_macro2::TokenStream,
+    http_handlers: &[&FunctionMetadata],
 ) -> proc_macro2::TokenStream {
     let http_request_match_arms = &handler_arms.http;
     let local_request_match_arms = &handler_arms.local;
     let remote_request_match_arms = &handler_arms.remote;
     // We now use the combined local_and_remote handlers for local messages
     let local_and_remote_request_match_arms = &handler_arms.local_and_remote;
+
+    // Generate method checking for HTTP handlers
+    let http_method_checks = http_handlers.iter().map(|handler| {
+        let variant_name = format_ident!("{}", &handler.variant_name);
+        let methods = &handler.http_methods;
+        
+        quote! {
+            (stringify!(#variant_name), vec![#(#methods),*])
+        }
+    });
+
+    // Generate path checking for HTTP handlers
+    let http_path_checks = http_handlers.iter().map(|handler| {
+        let variant_name = format_ident!("{}", &handler.variant_name);
+        
+        if let Some(path) = &handler.http_path {
+            quote! {
+                (stringify!(#variant_name), Some(#path))
+            }
+        } else {
+            quote! {
+                (stringify!(#variant_name), None::<&str>)
+            }
+        }
+    });
+
+    // Generate variant names for pattern matching
+    let variant_names: Vec<_> = http_handlers.iter().map(|handler| {
+        format_ident!("{}", &handler.variant_name)
+    }).collect();
 
     quote! {
         /// Handle messages from the HTTP server
@@ -923,11 +1063,117 @@ fn generate_message_handlers(
                     match http_server_request {
                         hyperware_process_lib::http::server::HttpServerRequest::Http(http_request) => {
                             hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                ctx.borrow_mut().current_path = Some(http_request.path().clone().expect("Failed to get path from HTTP request"));
+                                let mut ctx_mut = ctx.borrow_mut();
+                                ctx_mut.current_path = Some(http_request.path().clone().expect("Failed to get path from HTTP request"));
+                                ctx_mut.http_method = http_request.method.clone();
+                                //ctx_mut.http_query_params = http_request.query_params.clone();
                             });
 
+                            // Map of handler variants to their accepted HTTP methods
+                            let handler_methods: std::collections::HashMap<&str, Vec<&str>> = [
+                                #(#http_method_checks),*
+                            ].into_iter().collect();
+
+                            // Map of handler variants to their specific paths (if any)
+                            let handler_paths: std::collections::HashMap<&str, Option<&str>> = [
+                                #(#http_path_checks),*
+                            ].into_iter().collect();
+
                             // Get the blob containing the actual request
-                            let Some(blob) = message.blob() else {
+                            let blob_opt = message.blob();
+                            
+                            // Get the HTTP method and path
+                            let http_method = http_request.method.clone();
+                            let current_path = http_request.path().clone().expect("Failed to get path from HTTP request");
+                            
+                            // Check if request has no body or empty body
+                            let has_empty_body = blob_opt.is_none() || blob_opt.as_ref().map(|b| b.bytes.is_empty()).unwrap_or(false);
+                            
+                            if has_empty_body {
+                                // For requests with no body, try to deserialize an empty object
+                                // This will match handlers that take no parameters (empty struct variants)
+                                let empty_json = b"{}";
+                                
+                                match serde_json::from_slice::<HPMRequest>(empty_json) {
+                                    Ok(request) => {
+                                        // Check if this handler accepts this HTTP method
+                                        let variant_name = match &request {
+                                            #(HPMRequest::#variant_names{..} => stringify!(#variant_names),)*
+                                            _ => ""
+                                        };
+                                        
+                                        if let Some(methods) = handler_methods.get(variant_name) {
+                                            if !methods.contains(&http_method.as_str()) {
+                                                hyperware_process_lib::logging::warn!(
+                                                    "Handler {} does not accept {} requests. Accepted methods: {:?}",
+                                                    variant_name, http_method, methods
+                                                );
+                                                hyperware_process_lib::http::server::send_response(
+                                                    hyperware_process_lib::http::StatusCode::METHOD_NOT_ALLOWED,
+                                                    None,
+                                                    format!("Method {} not allowed", http_method).into_bytes()
+                                                );
+                                                hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                                                    ctx.borrow_mut().current_path = None;
+                                                });
+                                                return;
+                                            }
+                                        }
+                                        
+                                        // Check path compatibility
+                                        if let Some(Some(handler_path)) = handler_paths.get(variant_name) {
+                                            if &current_path != handler_path {
+                                                hyperware_process_lib::logging::error!(
+                                                    "Handler {} is bound to path {} but request is for {}",
+                                                    variant_name, handler_path, current_path,
+                                                    error = true
+                                                );
+                                                hyperware_process_lib::http::server::send_response(
+                                                    hyperware_process_lib::http::StatusCode::NOT_FOUND,
+                                                    None,
+                                                    b"No handler for this path".to_vec()
+                                                );
+                                                hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                                                    ctx.borrow_mut().current_path = None;
+                                                });
+                                                return;
+                                            }
+                                        }
+                                        
+                                        // Handle the HTTP request
+                                        unsafe {
+                                            #http_request_match_arms
+
+                                            // Save state if needed
+                                            hyperware_app_common::maybe_save_state(&mut *state);
+                                        }
+                                    },
+                                    Err(e) => {
+                                        hyperware_process_lib::logging::error!(
+                                            "No matching handler found for {} request with empty body. Path: {:?}",
+                                            http_method,
+                                            http_request.path()
+                                        );
+                                        
+                                        hyperware_process_lib::http::server::send_response(
+                                            hyperware_process_lib::http::StatusCode::NOT_FOUND,
+                                            None,
+                                            format!("No handler found for {} request", http_method).into_bytes()
+                                        );
+                                    }
+                                }
+                                
+                                hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                                    let mut ctx_mut = ctx.borrow_mut();
+                                    ctx_mut.current_path = None;
+                                    ctx_mut.http_method = None;
+                                });
+                                return;
+                            }
+                            
+                            // For requests with body, parse the blob
+                            let Some(blob) = blob_opt else {
+                                // This shouldn't happen since we checked above, but handle it anyway
                                 hyperware_process_lib::logging::warn!("Failed to get blob for HTTP, sending BAD_REQUEST");
                                 hyperware_process_lib::http::server::send_response(
                                     hyperware_process_lib::http::StatusCode::BAD_REQUEST,
@@ -940,6 +1186,49 @@ fn generate_message_handlers(
                             // Process HTTP request
                             match serde_json::from_slice::<HPMRequest>(&blob.bytes) {
                                 Ok(request) => {
+                                    // Check if this handler accepts the HTTP method
+                                    let variant_name = match &request {
+                                        #(HPMRequest::#variant_names{..} => stringify!(#variant_names),)*
+                                        _ => ""
+                                    };
+                                    
+                                    if let Some(methods) = handler_methods.get(variant_name) {
+                                        if !methods.contains(&http_method.as_str()) {
+                                            hyperware_process_lib::logging::warn!(
+                                                "Handler {} does not accept {} requests. Accepted methods: {:?}",
+                                                variant_name, http_method, methods
+                                            );
+                                            hyperware_process_lib::http::server::send_response(
+                                                hyperware_process_lib::http::StatusCode::METHOD_NOT_ALLOWED,
+                                                None,
+                                                format!("Method {} not allowed", http_method).into_bytes()
+                                            );
+                                            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                                                ctx.borrow_mut().current_path = None;
+                                            });
+                                            return;
+                                        }
+                                    }
+                                    
+                                    // Check path compatibility
+                                    if let Some(Some(handler_path)) = handler_paths.get(variant_name) {
+                                        if &current_path != handler_path {
+                                            hyperware_process_lib::logging::info!(
+                                                "Handler {} is bound to path {} but request is for {}",
+                                                variant_name, handler_path, current_path
+                                            );
+                                            hyperware_process_lib::http::server::send_response(
+                                                hyperware_process_lib::http::StatusCode::NOT_FOUND,
+                                                None,
+                                                b"No handler for this path".to_vec()
+                                            );
+                                            hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                                                ctx.borrow_mut().current_path = None;
+                                            });
+                                            return;
+                                        }
+                                    }
+                                    
                                     // Handle the HTTP request
                                     unsafe {
                                         #http_request_match_arms
@@ -1055,6 +1344,7 @@ fn generate_component_impl(
     ws_method_details: &WsMethodDetails,
     handler_arms: &HandlerDispatch,
     has_init_logging: bool,
+    http_handlers: &[&FunctionMetadata],
 ) -> proc_macro2::TokenStream {
     // Extract values from args for use in the quote macro
     let name = &args.name;
@@ -1088,7 +1378,7 @@ fn generate_component_impl(
     let ws_method_call = &ws_method_details.call;
 
     // Generate message handler functions
-    let message_handlers = generate_message_handlers(self_ty, handler_arms, ws_method_call);
+    let message_handlers = generate_message_handlers(self_ty, handler_arms, ws_method_call, http_handlers);
 
     // Generate the logging initialization conditionally
     let logging_init = if !has_init_logging {
@@ -1288,6 +1578,7 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
         &ws_method_details,
         &handler_arms,
         has_init_logging,
+        &handlers.http,
     )
     .into()
 }

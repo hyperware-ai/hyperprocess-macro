@@ -141,7 +141,7 @@ Hyperware processes can handle three types of requests, specified by attributes:
 |-----------|-------------|
 | `#[local]` | Handles local (same-node) requests |
 | `#[remote]` | Handles remote (cross-node) requests |
-| `#[http]` | Handles HTTP requests to your process endpoints |
+| `#[http]` | Handles ALL HTTP requests (GET, POST, PUT, DELETE, etc.) |
 
 These attributes can be combined to make a handler respond to multiple request types:
 
@@ -153,6 +153,12 @@ async fn increment_counter(&mut self, value: i32) -> i32 {
     self.counter
 }
 
+#[http]
+fn handle_any_http(&mut self) -> String {
+    // This handles ALL HTTP methods (GET, POST, PUT, DELETE, etc.)
+    format!("Handled request to path: {}", get_path().unwrap_or_default())
+}
+
 #[remote]
 fn get_status(&mut self) -> String {
     format!("Status: {}", self.counter)
@@ -160,6 +166,125 @@ fn get_status(&mut self) -> String {
 ```
 
 The function arguments and the return values _have_ to be serializable with `Serde`.
+
+#### HTTP Method Support
+
+The `#[http]` attribute supports all HTTP methods by default, or you can specify specific methods:
+
+```rust
+// Handle ALL HTTP methods
+#[http]
+fn handle_all_methods(&mut self) -> Response {
+    // Access the current path with get_path()
+    // Access query parameters with get_query_params()
+    Response::ok()
+}
+
+// Handle only specific methods
+#[http(method = "GET")]
+fn list_items(&mut self) -> Vec<Item> {
+    // Only handles GET requests
+    self.items.clone()
+}
+
+#[http(method = "POST")]
+async fn create_item(&mut self, item: NewItem) -> ItemResponse {
+    // Only handles POST requests with JSON body
+    self.items.push(item);
+    ItemResponse { success: true }
+}
+
+#[http(method = "PUT")]
+fn update_item(&mut self, id: u64, item: UpdateItem) -> Result<Item, String> {
+    // Only handles PUT requests
+    // ...
+}
+
+#[http(method = "DELETE")]
+fn delete_item(&mut self, id: u64) -> Result<(), String> {
+    // Only handles DELETE requests
+    // ...
+}
+```
+
+**Supported Methods**: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`
+
+**Default Behavior**: 
+- `#[http]` without parameters accepts ALL HTTP methods
+- `#[http(method = "GET")]` accepts only GET requests
+
+**Important Notes**:
+- **Handlers with no parameters**: Can handle any HTTP method with empty body (common for GET, DELETE)
+- **Handlers with parameters**: Expect a JSON body that will be deserialized
+- If a request body cannot be deserialized to match any handler, a 404 is returned
+- The framework returns `405 Method Not Allowed` if a request uses a method not accepted by the handler
+
+#### Path-Specific Routing
+
+You can bind HTTP handlers to specific paths using the `path` parameter:
+
+```rust
+#[hyperprocess(
+    endpoints = vec![
+        Binding::Http { path: "/api", config: HttpBindingConfig::default() },
+        Binding::Http { path: "/admin", config: HttpBindingConfig::default() }
+    ],
+    // ... other params
+)]
+impl MyApp {
+    // Handler for a specific path
+    #[http(method = "GET", path = "/api/users")]
+    fn list_users(&mut self) -> Vec<User> {
+        // This handler ONLY responds to GET /api/users
+        self.users.clone()
+    }
+    
+    #[http(method = "POST", path = "/api/users")]
+    fn create_user(&mut self, user: NewUser) -> User {
+        // This handler ONLY responds to POST /api/users
+        let user = User::from(user);
+        self.users.push(user.clone());
+        user
+    }
+    
+    #[http(path = "/api/status")]
+    fn api_status(&mut self) -> Status {
+        // This handles ALL methods to /api/status
+        Status { healthy: true }
+    }
+    
+    // Handler without specific path (responds to any path)
+    #[http(method = "GET")]
+    fn catch_all_get(&mut self) -> String {
+        // This handles GET requests to any path not handled by specific handlers
+        format!("Generic GET handler for path: {}", get_path().unwrap_or_default())
+    }
+    
+    #[http]
+    fn fallback(&mut self) -> Response {
+        // This handles ALL methods to ALL paths (ultimate fallback)
+        Response::not_found()
+    }
+}
+```
+
+**Path Binding**: When you specify a path, the handler will ONLY respond to requests for that exact path.
+
+**Routing Priority**:
+1. Exact path match with method match
+2. Exact path match with any method (if handler accepts the method)
+3. No path specified with method match
+4. Error responses (404 Not Found or 405 Method Not Allowed)
+
+**Important Notes**:
+- **GET Requests**: Should typically use handlers with no parameters (besides `&mut self`). Query parameters can be accessed via `get_query_params()`.
+- **Other Methods**: Expect a JSON body that will be deserialized into the handler's parameters.
+- The framework will return a `405 Method Not Allowed` response if a request uses an HTTP method not accepted by the handler.
+
+**Current Limitations**:
+- Cannot have multiple handlers for the same path with different HTTP methods
+- All non-GET requests expect JSON request bodies
+- No automatic query parameter binding for GET requests
 
 ### Special Methods
 
@@ -286,6 +411,60 @@ async fn my_function() {
     }
 }
 ```
+
+## Query Parameters
+
+For GET requests, query parameters can be accessed using the `get_query_params()` helper function from `hyperware_app_common`:
+
+```rust
+use hyperware_app_common::get_query_params;
+
+#[http(method = "GET")]
+fn search(&mut self) -> SearchResults {
+    if let Some(params) = get_query_params() {
+        let query = params.get("q").unwrap_or(&"".to_string());
+        // Process search query
+    }
+    SearchResults::default()
+}
+```
+
+### Example: Query Parameter Parsing
+
+For a request to `/api/search?q=rust&limit=20&sort=date`:
+
+```rust
+#[http(method = "GET")]
+fn search(&mut self) -> Vec<SearchResult> {
+    if let Some(params) = get_query_params() {
+        // params is a HashMap<String, String> with:
+        // {"q" => "rust", "limit" => "20", "sort" => "date"}
+        
+        // Get search query (with default)
+        let query = params.get("q")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "".to_string());
+        
+        // Parse numeric parameters
+        let limit = params.get("limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(10);
+        
+        // Get optional parameters
+        let sort_by = params.get("sort")
+            .map(|s| s.as_str())
+            .unwrap_or("relevance");
+        
+        // Use the parameters
+        self.perform_search(&query, limit, sort_by)
+    } else {
+        // No query parameters - return empty results
+        vec![]
+    }
+}
+```
+
+**Note**: All query parameter values are strings, so you need to parse them to other types as needed.
 
 ## Part 2: Technical Implementation
 

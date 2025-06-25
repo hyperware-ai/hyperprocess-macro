@@ -1059,7 +1059,7 @@ fn generate_component_impl(
     // Extract values from args for use in the quote macro
     let name = &args.name;
     let endpoints = &args.endpoints;
-    let _save_config = &args.save_config;
+    let save_config = &args.save_config;
     let wit_world = &args.wit_world;
 
     let icon = match &args.icon {
@@ -1131,6 +1131,13 @@ fn generate_component_impl(
             fn init(_our: String) {
                 // Initialize our state
                 let mut state = hyperware_app_common::initialize_state::<#self_ty>();
+
+                // Set to persist state according to user setting
+                hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                    ctx.borrow_mut().hidden_state = Some(
+                        hyperware_app_common::HiddenState::new(#save_config)
+                    );
+                });
 
                 // Set up necessary components
                 let app_name = #name;

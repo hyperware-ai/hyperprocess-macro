@@ -174,35 +174,39 @@ The `#[http]` attribute supports all HTTP methods by default, or you can specify
 ```rust
 // Handle ALL HTTP methods
 #[http]
-fn handle_all_methods(&mut self) -> Response {
+fn handle_all_methods(&mut self, request_data: RequestData) -> Response {
     // Access the current path with get_path()
     // Access query parameters with get_query_params()
     Response::ok()
 }
 
 // Handle only specific methods
-#[http(method = "GET")]
+#[http(method = "GET", path = "/api/items")]
 fn list_items(&mut self) -> Vec<Item> {
-    // Only handles GET requests
+    // Parameter-less handlers MUST specify a path
+    // This only handles GET requests to /api/items
     self.items.clone()
 }
 
 #[http(method = "POST")]
 async fn create_item(&mut self, item: NewItem) -> ItemResponse {
-    // Only handles POST requests with JSON body
+    // Handlers with parameters can omit the path
+    // They are matched by deserializing the request body
     self.items.push(item);
     ItemResponse { success: true }
 }
 
-#[http(method = "PUT")]
-fn update_item(&mut self, id: u64, item: UpdateItem) -> Result<Item, String> {
-    // Only handles PUT requests
+#[http(method = "PUT", path = "/api/item")]
+fn update_item(&mut self, item: UpdateItem) -> Result<Item, String> {
+    // Handlers with parameters can also specify a path for clarity
     // ...
 }
 
-#[http(method = "DELETE")]
-fn delete_item(&mut self, id: u64) -> Result<(), String> {
-    // Only handles DELETE requests
+#[http(method = "DELETE", path = "/api/item")]
+fn delete_item(&mut self) -> Result<(), String> {
+    // DELETE often has no body, so must specify path
+    let params = get_query_params();
+    let id = params.and_then(|p| p.get("id")?.parse().ok())?;
     // ...
 }
 ```
@@ -213,10 +217,15 @@ fn delete_item(&mut self, id: u64) -> Result<(), String> {
 - `#[http]` without parameters accepts ALL HTTP methods
 - `#[http(method = "GET")]` accepts only GET requests
 
-**Important Notes**:
-- **Handlers with no parameters**: Can handle any HTTP method with empty body (common for GET, DELETE)
-- **Handlers with parameters**: Expect a JSON body that will be deserialized
-- If a request body cannot be deserialized to match any handler, a 404 is returned
+**Important Requirements**:
+- **Parameter-less handlers**: Can optionally specify a `path` attribute for exact path matching (e.g., `#[http(method = "GET", path = "/api/users")]`)
+- **Handlers without path**: Use `get_path()` and `get_http_method()` inside the handler to determine routing logic
+- **Handlers with parameters**: Path is optional; they are matched by deserializing the request body
+
+**Routing System**:
+- **Parameter-less handlers**: Matched first by path and HTTP method
+- **Handlers with parameters**: Matched by deserializing the request body when no parameter-less handler matches
+- If a request body cannot be deserialized to match any handler, a 400 Bad Request is returned
 - The framework returns `405 Method Not Allowed` if a request uses a method not accepted by the handler
 
 #### Path-Specific Routing
@@ -232,13 +241,14 @@ You can bind HTTP handlers to specific paths using the `path` parameter:
     // ... other params
 )]
 impl MyApp {
-    // Handler for a specific path
+    // Parameter-less handler (path REQUIRED)
     #[http(method = "GET", path = "/api/users")]
     fn list_users(&mut self) -> Vec<User> {
         // This handler ONLY responds to GET /api/users
         self.users.clone()
     }
     
+    // Handler with parameters (path optional but recommended)
     #[http(method = "POST", path = "/api/users")]
     fn create_user(&mut self, user: NewUser) -> User {
         // This handler ONLY responds to POST /api/users
@@ -247,23 +257,28 @@ impl MyApp {
         user
     }
     
+    // Parameter-less handler accepting all methods (path optional)
     #[http(path = "/api/status")]
     fn api_status(&mut self) -> Status {
         // This handles ALL methods to /api/status
         Status { healthy: true }
     }
     
-    // Handler without specific path (responds to any path)
-    #[http(method = "GET")]
-    fn catch_all_get(&mut self) -> String {
-        // This handles GET requests to any path not handled by specific handlers
-        format!("Generic GET handler for path: {}", get_path().unwrap_or_default())
+    // Parameter-less handler for any path - uses get_path() for routing
+    #[http]
+    fn dynamic_handler(&mut self) -> Response {
+        match get_path().as_deref() {
+            Some("/api/health") => Response::ok("Healthy"),
+            Some("/api/version") => Response::ok("1.0.0"),
+            _ => Response::not_found("Unknown endpoint")
+        }
     }
     
-    #[http]
-    fn fallback(&mut self) -> Response {
-        // This handles ALL methods to ALL paths (ultimate fallback)
-        Response::not_found()
+    // Handler with parameters without specific path
+    #[http(method = "POST")]
+    fn generic_post_handler(&mut self, data: GenericData) -> Response {
+        // This handles POST requests with matching body to any path
+        Response::ok()
     }
 }
 ```
@@ -271,20 +286,22 @@ impl MyApp {
 **Path Binding**: When you specify a path, the handler will ONLY respond to requests for that exact path.
 
 **Routing Priority**:
-1. Exact path match with method match
-2. Exact path match with any method (if handler accepts the method)
-3. No path specified with method match
+1. Parameter-less handlers with exact path and method match
+2. Parameter-less handlers with exact path (any method)
+3. Handlers with parameters matched by request body deserialization
 4. Error responses (404 Not Found or 405 Method Not Allowed)
 
-**Important Notes**:
-- **GET Requests**: Should typically use handlers with no parameters (besides `&mut self`). Query parameters can be accessed via `get_query_params()`.
-- **Other Methods**: Expect a JSON body that will be deserialized into the handler's parameters.
-- The framework will return a `405 Method Not Allowed` response if a request uses an HTTP method not accepted by the handler.
+**Compile-Time Validations**:
+- All handler names must be unique when converted to CamelCase (e.g., `get_user` and `get_user` conflict)
+- Init methods must be async and take only `&mut self`
+- WebSocket methods must have exactly 3 parameters: `channel_id: u32`, `message_type: WsMessageType`, `blob: LazyLoadBlob`
+- At least one handler must be defined (`#[http]`, `#[local]`, or `#[remote]`)
+- The macro provides comprehensive error messages with debugging tips for all validation failures
 
 **Current Limitations**:
-- Cannot have multiple handlers for the same path with different HTTP methods
-- All non-GET requests expect JSON request bodies
-- No automatic query parameter binding for GET requests
+- All requests with parameters expect JSON request bodies in the format `{"HandlerName": parameter_value}`
+- No automatic query parameter binding (use `get_query_params()` to access them manually)
+- WebSocket path routing requires manual checking with `get_path()` in the WebSocket handler
 
 ### Special Methods
 
@@ -466,6 +483,207 @@ fn search(&mut self) -> Vec<SearchResult> {
 
 **Note**: All query parameter values are strings, so you need to parse them to other types as needed.
 
+## Error Handling and Debugging
+
+The framework provides comprehensive error handling and debugging capabilities:
+
+### Comprehensive Logging
+
+The macro generates detailed logging for all operations:
+
+```rust
+// Automatically generated logs help track request flow:
+// Phase 1: Checking parameter-less handlers for path: '/api/users', method: 'GET'
+// Successfully parsed HTTP path: '/api/users' 
+// Set current_path to: Some("/api/users")
+// Set current_http_method to: Some("GET")
+```
+
+### Request Deserialization Errors
+
+When request bodies don't match handler expectations, you get helpful error messages:
+
+```
+Failed to deserialize HTTP request into HPMRequest enum.
+Error: missing field `CreateUser` at line 1 column 15
+Path: /api/users
+Method: POST
+Body received:
+{
+  "createuser": "john_doe"
+}
+
+Debugging tips:
+- Check that your request body matches one of the expected handler parameter types
+- For handlers with parameters, the JSON should be in format {"HandlerName": parameter_value}
+- For parameter-less handlers, use get_path() and get_http_method() inside handlers to access request context
+```
+
+### Compile-Time Validation
+
+The macro catches configuration errors at compile time:
+
+```rust
+// This will fail to compile:
+#[hyperprocess(
+    name = "test-app",
+    // Missing required 'endpoints' parameter
+    save_config = SaveOptions::Never,
+    wit_world = "my-world"
+)]
+impl MyApp {
+    #[init]
+    fn init_app(&mut self) -> String {  // ERROR: Init should not return value
+        "initialized".to_string()
+    }
+}
+```
+
+### Context Access Helpers
+
+Use these functions to access request context within handlers:
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `get_path()` | `Option<String>` | Current HTTP path |
+| `get_http_method()` | `Option<String>` | Current HTTP method |
+| `get_query_params()` | `Option<HashMap<String, String>>` | Query parameters |
+| `source()` | `Address` | Address of the message sender |
+
+### Two-Phase HTTP Routing
+
+Understanding the routing system helps debug request handling issues:
+
+1. **Phase 1: Parameter-less Handlers** - Matched by path and HTTP method
+2. **Phase 2: Body-based Handlers** - Matched by deserializing request body
+
+```rust
+// Phase 1: Direct path/method matching
+#[http(method = "GET", path = "/health")]
+fn health_check(&mut self) -> &'static str { "OK" }
+
+// Phase 2: Body deserialization matching  
+#[http(method = "POST")]
+fn create_user(&mut self, user: NewUser) -> User { ... }
+```
+
+## Common Patterns and Best Practices
+
+### Parameter-less vs Parameter-based Handlers
+
+Choose the right handler type for your use case:
+
+```rust
+// ✅ Good: Parameter-less handler for simple endpoints
+#[http(method = "GET", path = "/health")]
+fn health_check(&mut self) -> &'static str {
+    "OK"
+}
+
+// ✅ Good: Parameter-less handler with dynamic routing
+#[http]
+fn api_router(&mut self) -> Response {
+    match (get_http_method().as_deref(), get_path().as_deref()) {
+        (Some("GET"), Some("/api/users")) => self.list_users(),
+        (Some("GET"), Some("/api/stats")) => self.get_stats(), 
+        _ => Response::not_found("Endpoint not found")
+    }
+}
+
+// ✅ Good: Parameter-based handler for complex data
+#[http(method = "POST")]
+async fn create_user(&mut self, user: CreateUserRequest) -> Result<User, String> {
+    // Validates and deserializes complex request automatically
+    self.users.push(user.into());
+    Ok(user)
+}
+```
+
+### Error Handling Patterns
+
+```rust
+// ✅ Good: Use Result types for handlers that can fail
+#[http]
+fn risky_operation(&mut self, input: String) -> Result<String, String> {
+    if input.is_empty() {
+        Err("Input cannot be empty".to_string())
+    } else {
+        Ok(format!("Processed: {}", input))
+    }
+}
+
+// ✅ Good: Use custom error types for better error handling
+#[derive(Serialize, Deserialize)]
+pub enum ApiError {
+    ValidationError(String),
+    NotFound(String),
+    InternalError,
+}
+
+#[http]
+fn validated_handler(&mut self, data: InputData) -> Result<OutputData, ApiError> {
+    data.validate()
+        .map_err(|e| ApiError::ValidationError(e))?;
+    
+    self.process(data)
+        .map_err(|_| ApiError::InternalError)
+}
+```
+
+### State Management Best Practices
+
+```rust
+#[derive(Default, Serialize, Deserialize)]
+struct MyAppState {
+    // ✅ Use reasonable defaults
+    pub counter: u64,
+    pub users: Vec<User>,
+    
+    // ✅ Use Options for optional state
+    pub last_sync: Option<SystemTime>,
+    
+    // ✅ Group related data
+    pub config: AppConfig,
+}
+
+impl MyAppState {
+    // ✅ Provide helper methods for common operations
+    fn increment_counter(&mut self) -> u64 {
+        self.counter += 1;
+        self.counter
+    }
+    
+    fn add_user(&mut self, user: User) -> Result<(), String> {
+        if self.users.iter().any(|u| u.id == user.id) {
+            return Err("User already exists".to_string());
+        }
+        self.users.push(user);
+        Ok(())
+    }
+}
+```
+
+### Async Handler Patterns
+
+```rust
+#[http]
+async fn fetch_external_data(&mut self, query: String) -> Result<String, String> {
+    // ✅ Good: Use the built-in send function for RPC calls
+    let result = send::<ExternalApiResponse>(
+        ExternalApiRequest { query },
+        &external_service_address(),
+        10 // timeout in seconds
+    ).await;
+    
+    match result {
+        SendResult::Success(response) => Ok(response.data),
+        SendResult::Timeout => Err("Request timed out".to_string()),
+        SendResult::Offline => Err("External service unavailable".to_string()),
+        SendResult::DeserializationError(e) => Err(format!("Invalid response: {}", e)),
+    }
+}
+```
+
 ## Part 2: Technical Implementation
 
 ### Architecture Overview
@@ -585,11 +803,41 @@ fn generate_component_impl(...) -> proc_macro2::TokenStream {
 The flow of a request through the system:
 
 1. Message arrives (HTTP, local, or remote)
-2. Main event loop deserializes it into a Request enum
-3. Appropriate handler is dispatched based on message type
-4. For async handlers, the future is spawned on the executor
-5. When handler completes, response is serialized and sent back
-6. For async handlers, awaiting futures are resumed with the response
+2. For HTTP requests:
+   - First attempts to match parameter-less handlers by path and method
+   - If no match, attempts to deserialize body and match handlers with parameters
+3. For local/remote requests:
+   - Deserializes body into Request enum
+4. Appropriate handler is dispatched based on message type
+5. For async handlers, the future is spawned on the executor
+6. When handler completes, response is serialized and sent back
+7. For async handlers, awaiting futures are resumed with the response
+
+#### HTTP Request Routing Details
+
+The HTTP routing system uses a two-phase approach:
+
+**Phase 1: Parameter-less Handler Matching**
+- Checks incoming path and HTTP method against parameter-less handlers
+- These handlers are matched directly without body deserialization
+- Useful for GET endpoints, health checks, and other body-less requests
+
+**Phase 2: Body-Based Handler Matching**
+- Only triggered if no parameter-less handler matches
+- Deserializes request body to determine which handler to invoke
+- Matches handlers that expect parameters
+
+This design allows clean APIs for simple endpoints while maintaining flexibility for complex requests:
+
+```rust
+// Phase 1: Matched by path/method
+#[http(method = "GET", path = "/health")]
+fn health_check(&mut self) -> &'static str { "OK" }
+
+// Phase 2: Matched by body deserialization
+#[http(method = "POST")]
+fn process_data(&mut self, data: MyData) -> Result<Response, Error> { ... }
+```
 
 ### Async Runtime
 

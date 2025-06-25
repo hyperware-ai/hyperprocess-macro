@@ -713,13 +713,17 @@ fn generate_request_response_enums(
         return (quote! {}, quote! {});
     }
 
-    // HPMRequest enum variants
-    let request_variants = function_metadata.iter().map(|func| {
-        let variant_name = format_ident!("{}", &func.variant_name);
-        generate_enum_variant(&variant_name, &func.params)
-    });
+    // HPMRequest enum variants - ONLY include handlers that have parameters
+    // Parameter-less handlers are dispatched directly in Phase 1, not through enum deserialization
+    let request_variants = function_metadata
+        .iter()
+        .filter(|func| !func.params.is_empty()) // Only include handlers with parameters
+        .map(|func| {
+            let variant_name = format_ident!("{}", &func.variant_name);
+            generate_enum_variant(&variant_name, &func.params)
+        });
 
-    // HPMResponse enum variants
+    // HPMResponse enum variants - include ALL handlers since they all need to return responses
     let response_variants = function_metadata.iter().map(|func| {
         let variant_name = format_ident!("{}", &func.variant_name);
 
@@ -1030,8 +1034,12 @@ fn generate_message_handlers(
     // We now use the combined local_and_remote handlers for local messages
     let local_and_remote_request_match_arms = &handler_arms.local_and_remote;
 
-    // Generate method checking for HTTP handlers
-    let http_method_checks = http_handlers.iter().map(|handler| {
+    // Generate method checking for HTTP handlers with parameters (Phase 2 only)
+    let http_handlers_with_params: Vec<_> = http_handlers.iter()
+        .filter(|h| !h.params.is_empty())
+        .collect();
+    
+    let http_method_checks = http_handlers_with_params.iter().map(|handler| {
         let variant_name = format_ident!("{}", &handler.variant_name);
         let methods = &handler.http_methods;
         let path = handler.http_path.as_deref().unwrap_or("");
@@ -1041,8 +1049,8 @@ fn generate_message_handlers(
         }
     });
 
-    // Generate path checking for HTTP handlers
-    let http_path_checks = http_handlers.iter().map(|handler| {
+    // Generate path checking for HTTP handlers with parameters (Phase 2 only)
+    let http_path_checks = http_handlers_with_params.iter().map(|handler| {
         let variant_name = format_ident!("{}", &handler.variant_name);
         
         if let Some(path) = &handler.http_path {
@@ -1056,27 +1064,51 @@ fn generate_message_handlers(
         }
     });
 
-    // Generate variant names for pattern matching
-    let http_variants_with_params: Vec<_> = http_handlers.iter()
-        .filter(|h| !h.params.is_empty())
+    // Generate variant names for pattern matching (Phase 2 only)
+    let http_variants_with_params: Vec<_> = http_handlers_with_params.iter()
         .map(|handler| {
             format_ident!("{}", &handler.variant_name)
         }).collect();
 
+    // Collect all specific paths from ALL handlers (parameter-less AND parameter-based)
+    // This prevents dynamic routing from intercepting paths that have specific handlers
+    let specific_paths: Vec<_> = http_handlers
+        .iter()
+        .filter_map(|h| h.http_path.as_ref())
+        .collect();
+    
     // --- Parameter-less Handler Dispatch ---
     // Generate direct dispatch logic for HTTP handlers that don't take parameters.
     // These are matched by path and method directly, bypassing serde deserialization of the body.
-    let parameterless_dispatch_arms = http_handlers
-        .iter()
-        .filter(|h| h.params.is_empty())
-        .map(|handler| {
+    // SMART ORDERING: Sort handlers by specificity to avoid catch-all handlers intercepting everything
+    let parameterless_dispatch_arms = {
+        let mut sorted_handlers: Vec<_> = http_handlers
+            .iter()
+            .filter(|h| h.params.is_empty())
+            .collect();
+        
+        // Sort by specificity (lower scores = higher priority)
+        sorted_handlers.sort_by_key(|handler| {
+            match (&handler.http_path, handler.http_methods.len()) {
+                // Highest priority: Specific path + specific method
+                (Some(_), 1) => 0,
+                // High priority: Specific path + multiple methods
+                (Some(_), _) => 10,
+                // Low priority: No path + specific method (dynamic routing)
+                (None, 1) => 100,
+                // Lowest priority: No path + multiple methods (true catch-all)
+                (None, _) => 200,
+            }
+        });
+        
+        sorted_handlers.into_iter().map(|handler| {
             let fn_name = &handler.name;
             let path_check = if let Some(path) = &handler.http_path {
                 quote! { && &current_path == #path }
             } else {
-                // If no path is specified, this handler matches any path
-                // The handler can use get_path() to determine what to do
-                quote! { /* matches any path */ }
+                // Dynamic routing: match any path EXCEPT those with specific handlers
+                // This prevents dynamic handlers from intercepting requests meant for specific handlers
+                quote! { && ![#(#specific_paths),*].contains(&current_path.as_str()) }
             };
             let methods = &handler.http_methods;
             let method_check = quote! { && [#(#methods),*].contains(&http_method.as_str()) };
@@ -1146,7 +1178,8 @@ fn generate_message_handlers(
                     return;
                 }
             }
-        });
+        })
+    };
 
     quote! {
         /// Handle messages from the HTTP server
@@ -1192,7 +1225,8 @@ fn generate_message_handlers(
 
                              // --- Begin Parameter-less Dispatch ---
                             // First, try to match and dispatch to a handler that takes no parameters.
-                            hyperware_process_lib::logging::info!("Phase 1: Checking parameter-less handlers for path: '{}', method: '{}'", current_path, http_method);
+                            // Handlers are now sorted by specificity to prevent catch-all issues
+                            hyperware_process_lib::logging::info!("Phase 1: Checking parameter-less handlers for path: '{}', method: '{}' (sorted by specificity)", current_path, http_method);
                             #(#parameterless_dispatch_arms)*
                             // --- End Parameter-less Dispatch ---
                             hyperware_process_lib::logging::info!("Phase 1 complete: No parameter-less handler matched. Starting Phase 2: body-based dispatch for handlers with parameters");

@@ -62,6 +62,10 @@ pub fn get_server() -> Option<&'static mut HttpServer> {
     APP_HELPERS.with(|ctx| ctx.borrow().current_server.map(|ptr| unsafe { &mut *ptr }))
 }
 
+pub fn get_http_method() -> Option<String> {
+    APP_HELPERS.with(|ctx| ctx.borrow().current_http_method.clone())
+}
+
 // Access function for the source address of the current message
 pub fn source() -> hyperware_process_lib::Address {
     APP_HELPERS.with(|ctx| {

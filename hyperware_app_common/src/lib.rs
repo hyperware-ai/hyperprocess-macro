@@ -6,9 +6,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures_util::task::noop_waker_ref;
-use hyperware_process_lib::{get_state, http, kiprintln, set_state, BuildError, LazyLoadBlob, Message,  Request, SendError};
-use hyperware_process_lib::logging::info;
 use hyperware_process_lib::http::server::HttpServer;
+use hyperware_process_lib::logging::info;
+use hyperware_process_lib::{
+    get_state, http, kiprintln, set_state, BuildError, LazyLoadBlob, Message, Request, SendError,
+};
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
@@ -50,7 +52,6 @@ pub struct AppHelpers {
     pub current_message: Option<Message>,
     pub current_http_method: Option<String>,
 }
-
 
 // Access function for the current path
 pub fn get_path() -> Option<String> {
@@ -173,10 +174,7 @@ where
     };
 
     let correlation_id = Uuid::new_v4().to_string();
-    if let Err(e) = request
-        .context(correlation_id.as_bytes().to_vec())
-        .send()
-    {
+    if let Err(e) = request.context(correlation_id.as_bytes().to_vec()).send() {
         return Err(AppSendError::BuildError(e));
     }
 
@@ -201,10 +199,7 @@ where
     };
 
     let correlation_id = Uuid::new_v4().to_string();
-    if let Err(e) = request
-        .context(correlation_id.as_bytes().to_vec())
-        .send()
-    {
+    if let Err(e) = request.context(correlation_id.as_bytes().to_vec()).send() {
         return Err(AppSendError::BuildError(e));
     }
 
@@ -394,19 +389,11 @@ pub fn no_http_api_call<S>(_state: &mut S, _req: ()) {
     // does nothing
 }
 
-pub fn no_local_request<S>(
-    _msg: &Message,
-    _state: &mut S,
-    _req: (),
-) {
+pub fn no_local_request<S>(_msg: &Message, _state: &mut S, _req: ()) {
     // does nothing
 }
 
-pub fn no_remote_request<S>(
-    _msg: &Message,
-    _state: &mut S,
-    _req: (),
-) {
+pub fn no_remote_request<S>(_msg: &Message, _state: &mut S, _req: ()) {
     // does nothing
 }
 

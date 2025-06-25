@@ -215,31 +215,34 @@ fn parse_http_attributes(method: &syn::ImplItemFn) -> (Vec<String>, Option<Strin
         if attr.path().is_ident("http") {
             // Handle #[http] with no arguments - defaults to ALL methods
             if matches!(&attr.meta, syn::Meta::Path(_)) {
-                return (vec![
-                    "GET".to_string(),
-                    "POST".to_string(),
-                    "PUT".to_string(),
-                    "DELETE".to_string(),
-                    "PATCH".to_string(),
-                    "HEAD".to_string(),
-                    "OPTIONS".to_string(),
-                ], None);
+                return (
+                    vec![
+                        "GET".to_string(),
+                        "POST".to_string(),
+                        "PUT".to_string(),
+                        "DELETE".to_string(),
+                        "PATCH".to_string(),
+                        "HEAD".to_string(),
+                        "OPTIONS".to_string(),
+                    ],
+                    None,
+                );
             }
-            
+
             // Handle #[http(method = "GET", path = "/api")]
             if let syn::Meta::List(list) = &attr.meta {
                 let mut methods = None;
                 let mut path = None;
-                
+
                 // Parse the token stream manually
                 let tokens: Vec<_> = list.tokens.clone().into_iter().collect();
                 let mut i = 0;
-                
+
                 while i < tokens.len() {
                     // Look for identifier (method or path)
                     if let proc_macro2::TokenTree::Ident(ident) = &tokens[i] {
                         let ident_str = ident.to_string();
-                        
+
                         // Check for = sign
                         if i + 2 < tokens.len() {
                             if let proc_macro2::TokenTree::Punct(punct) = &tokens[i + 1] {
@@ -249,10 +252,19 @@ fn parse_http_attributes(method: &syn::ImplItemFn) -> (Vec<String>, Option<Strin
                                         let lit_str = lit.to_string();
                                         // Remove quotes from the literal
                                         let value = lit_str.trim_matches('"');
-                                        
+
                                         if ident_str == "method" {
                                             let method = value.to_uppercase();
-                                            if matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS") {
+                                            if matches!(
+                                                method.as_str(),
+                                                "GET"
+                                                    | "POST"
+                                                    | "PUT"
+                                                    | "DELETE"
+                                                    | "PATCH"
+                                                    | "HEAD"
+                                                    | "OPTIONS"
+                                            ) {
                                                 methods = Some(vec![method]);
                                             }
                                         } else if ident_str == "path" {
@@ -260,7 +272,7 @@ fn parse_http_attributes(method: &syn::ImplItemFn) -> (Vec<String>, Option<Strin
                                         }
                                     }
                                     i += 3; // Skip ident, =, and literal
-                                    
+
                                     // Skip comma if present
                                     if i < tokens.len() {
                                         if let proc_macro2::TokenTree::Punct(punct) = &tokens[i] {
@@ -276,9 +288,26 @@ fn parse_http_attributes(method: &syn::ImplItemFn) -> (Vec<String>, Option<Strin
                     }
                     i += 1;
                 }
-                
+
                 // Default to ALL methods if none specified
-                let final_methods = methods.unwrap_or_else(|| vec![
+                let final_methods = methods.unwrap_or_else(|| {
+                    vec![
+                        "GET".to_string(),
+                        "POST".to_string(),
+                        "PUT".to_string(),
+                        "DELETE".to_string(),
+                        "PATCH".to_string(),
+                        "HEAD".to_string(),
+                        "OPTIONS".to_string(),
+                    ]
+                });
+
+                return (final_methods, path);
+            }
+
+            // Default to ALL methods if parsing fails
+            return (
+                vec![
                     "GET".to_string(),
                     "POST".to_string(),
                     "PUT".to_string(),
@@ -286,21 +315,9 @@ fn parse_http_attributes(method: &syn::ImplItemFn) -> (Vec<String>, Option<Strin
                     "PATCH".to_string(),
                     "HEAD".to_string(),
                     "OPTIONS".to_string(),
-                ]);
-                
-                return (final_methods, path);
-            }
-            
-            // Default to ALL methods if parsing fails
-            return (vec![
-                "GET".to_string(),
-                "POST".to_string(),
-                "PUT".to_string(),
-                "DELETE".to_string(),
-                "PATCH".to_string(),
-                "HEAD".to_string(),
-                "OPTIONS".to_string(),
-            ], None);
+                ],
+                None,
+            );
         }
     }
     (Vec::new(), None)
@@ -591,9 +608,7 @@ fn analyze_methods(
             // Handle request-response methods
             if has_http || has_local || has_remote {
                 validate_request_response_function(method)?;
-                let metadata = extract_function_metadata(
-                    method, has_local, has_remote, has_http,
-                );
+                let metadata = extract_function_metadata(method, has_local, has_remote, has_http);
 
                 // Parameter-less HTTP handlers can optionally specify a path, but it's not required
                 // They can use get_path() and get_method() to handle requests dynamically
@@ -1035,10 +1050,11 @@ fn generate_message_handlers(
     let local_and_remote_request_match_arms = &handler_arms.local_and_remote;
 
     // Generate method checking for HTTP handlers with parameters (Phase 2 only)
-    let http_handlers_with_params: Vec<_> = http_handlers.iter()
+    let http_handlers_with_params: Vec<_> = http_handlers
+        .iter()
         .filter(|h| !h.params.is_empty())
         .collect();
-    
+
     let http_method_checks = http_handlers_with_params.iter().map(|handler| {
         let variant_name = format_ident!("{}", &handler.variant_name);
         let methods = &handler.http_methods;
@@ -1052,7 +1068,7 @@ fn generate_message_handlers(
     // Generate path checking for HTTP handlers with parameters (Phase 2 only)
     let http_path_checks = http_handlers_with_params.iter().map(|handler| {
         let variant_name = format_ident!("{}", &handler.variant_name);
-        
+
         if let Some(path) = &handler.http_path {
             quote! {
                 (stringify!(#variant_name), Some(#path))
@@ -1065,10 +1081,10 @@ fn generate_message_handlers(
     });
 
     // Generate variant names for pattern matching (Phase 2 only)
-    let http_variants_with_params: Vec<_> = http_handlers_with_params.iter()
-        .map(|handler| {
-            format_ident!("{}", &handler.variant_name)
-        }).collect();
+    let http_variants_with_params: Vec<_> = http_handlers_with_params
+        .iter()
+        .map(|handler| format_ident!("{}", &handler.variant_name))
+        .collect();
 
     // Collect all specific paths from ALL handlers (parameter-less AND parameter-based)
     // This prevents dynamic routing from intercepting paths that have specific handlers
@@ -1076,7 +1092,7 @@ fn generate_message_handlers(
         .iter()
         .filter_map(|h| h.http_path.as_ref())
         .collect();
-    
+
     // --- Parameter-less Handler Dispatch ---
     // Generate direct dispatch logic for HTTP handlers that don't take parameters.
     // These are matched by path and method directly, bypassing serde deserialization of the body.
@@ -1086,7 +1102,7 @@ fn generate_message_handlers(
             .iter()
             .filter(|h| h.params.is_empty())
             .collect();
-        
+
         // Sort by specificity (lower scores = higher priority)
         sorted_handlers.sort_by_key(|handler| {
             match (&handler.http_path, handler.http_methods.len()) {
@@ -1100,7 +1116,7 @@ fn generate_message_handlers(
                 (None, _) => 200,
             }
         });
-        
+
         sorted_handlers.into_iter().map(|handler| {
             let fn_name = &handler.name;
             let path_check = if let Some(path) = &handler.http_path {
@@ -1196,7 +1212,7 @@ fn generate_message_handlers(
                                     hyperware_process_lib::logging::warn!("Failed to parse HTTP method: {}", e);
                                     "UNKNOWN".to_string()
                                 });
-                            
+
                             let current_path = match http_request.path() {
                                 Ok(path) => {
                                     hyperware_process_lib::logging::info!("Successfully parsed HTTP path: '{}'", path);
@@ -1303,7 +1319,7 @@ fn generate_message_handlers(
                                     let pretty_json = serde_json::from_slice::<serde_json::Value>(&blob.bytes)
                                         .map(|v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| "Invalid JSON".to_string()))
                                         .unwrap_or_else(|_| format!("Non-JSON body: {}", raw_body));
-                                    
+
                                     hyperware_process_lib::logging::error!(
                                         "Failed to deserialize HTTP request into HPMRequest enum.\n\
                                         Error: {}\n\
@@ -1494,7 +1510,8 @@ fn generate_component_impl(
     let ws_method_call = &ws_method_details.call;
 
     // Generate message handler functions
-    let message_handlers = generate_message_handlers(self_ty, handler_arms, ws_method_call, http_handlers);
+    let message_handlers =
+        generate_message_handlers(self_ty, handler_arms, ws_method_call, http_handlers);
 
     // Generate the logging initialization conditionally
     let logging_init = if !has_init_logging {
@@ -1653,7 +1670,12 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
     let handlers = HandlerGroups::from_function_metadata(&function_metadata);
 
     // HTTP handlers with parameters will be part of the HPMRequest enum and dispatched via body deserialization.
-    let http_handlers_with_params: Vec<_> = handlers.http.iter().filter(|h| !h.params.is_empty()).cloned().collect();
+    let http_handlers_with_params: Vec<_> = handlers
+        .http
+        .iter()
+        .filter(|h| !h.params.is_empty())
+        .cloned()
+        .collect();
 
     // Collect all function metadata that will be represented in the HPMRequest enum.
     // This includes all local and remote handlers, plus HTTP handlers that have parameters.

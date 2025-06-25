@@ -1135,7 +1135,7 @@ fn generate_component_impl(
                 // Set to persist state according to user setting
                 hyperware_app_common::APP_CONTEXT.with(|ctx| {
                     ctx.borrow_mut().hidden_state = Some(
-                        hyperware_app_common::HiddenState::new(save_config)
+                        hyperware_app_common::HiddenState::new(#save_config)
                     );
                 });
 

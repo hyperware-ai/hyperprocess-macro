@@ -654,6 +654,17 @@ fn analyze_methods(
                     }
                     http_routes.insert(route_key, &func.name);
                 }
+            } else {
+                // Warn about overly broad GET handlers that could interfere with UI
+                if func.http_methods.contains(&"GET".to_string()) && func.params.is_empty() {
+                    eprintln!(
+                        "⚠️  WARNING: Handler '{}' uses #[http(method = \"GET\")] without a specific path.\n\
+                        This will match ALL GET requests except UI paths (/, /ui/, /assets/, /static/).\n\
+                        Consider using a specific path like #[http(method = \"GET\", path = \"/api/items\")] \n\
+                        or implement path filtering inside your handler with get_path().\n",
+                        func.name
+                    );
+                }
             }
             // Method-only handlers (no specific path) are allowed to coexist
             // They can use get_path() at runtime to implement custom routing logic
@@ -1267,8 +1278,21 @@ fn generate_message_handlers(
         let path_check = if let Some(path) = &handler.http_path {
             quote! { &current_path == #path }
         } else {
-            // Dynamic routing: match any path EXCEPT those with specific handlers
-            quote! { ![#(#specific_paths),*].contains(&current_path.as_str()) }
+            // Dynamic routing: match any path EXCEPT those with specific handlers AND UI reserved paths
+            let is_get_handler = handler.http_methods.contains(&"GET".to_string());
+            if is_get_handler {
+                // For GET handlers, exclude UI reserved paths to prevent conflicts with the frontend
+                quote! { 
+                    ![#(#specific_paths),*].contains(&current_path.as_str()) && 
+                    !current_path.starts_with("/ui") && 
+                    current_path != "/" &&
+                    !current_path.starts_with("/assets") &&
+                    !current_path.starts_with("/static")
+                }
+            } else {
+                // For non-GET handlers, only exclude specific paths (UI paths are safe)
+                quote! { ![#(#specific_paths),*].contains(&current_path.as_str()) }
+            }
         };
         let methods = &handler.http_methods;
         let method_check = quote! { [#(#methods),*].contains(&http_method.as_str()) };
@@ -1339,13 +1363,15 @@ fn generate_message_handlers(
     quote! {
         /// Handle messages from the HTTP server
         fn handle_http_server_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
+            // Get the blob early for all message types - HTTP and WebSocket both might need it
+            let blob_opt = message.blob();
+            
             // Parse HTTP server request
             match serde_json::from_slice::<hyperware_process_lib::http::server::HttpServerRequest>(message.body()) {
                 Ok(http_server_request) => {
                     match http_server_request {
                         hyperware_process_lib::http::server::HttpServerRequest::Http(http_request) => {
-                            // Get the blob early - we'll need it for parameterized handlers
-                            let blob_opt = message.blob();
+                            // Use the already captured blob for HTTP requests
                             
                             // Debug the message structure
                             hyperware_process_lib::logging::debug!("Processing HTTP request, message has blob: {}", blob_opt.is_some());
@@ -1458,7 +1484,9 @@ fn generate_message_handlers(
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
                             hyperware_process_lib::logging::debug!("Received WebSocket message on channel {}, type: {:?}", channel_id, message_type);
-                            let Some(blob) = message.blob() else {
+                            
+                            // Use the already captured blob
+                            let Some(blob) = blob_opt else {
                                 hyperware_process_lib::logging::error!(
                                     "Failed to get blob for WebSocketPush on channel {}. This indicates a malformed WebSocket message.",
                                     channel_id

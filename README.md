@@ -777,6 +777,46 @@ fn user_handler(&mut self, user: User) -> User {
 }
 ```
 
+#### **UI Path Conflicts (Critical!):**
+
+```rust
+// ❌ DANGEROUS - This will prevent UI from loading!
+#[http(method = "GET")]
+fn catch_all_get(&mut self) -> Response {
+    // This would intercept GET / and break the frontend
+    Response::ok("All GET requests")
+}
+
+// ✅ SAFE - Framework automatically excludes UI paths
+#[http(method = "GET")]  
+fn api_get_handler(&mut self) -> Response {
+    let path = get_path().unwrap_or_default();
+    // This will NOT match:
+    // - / (root UI)
+    // - /ui/* (UI assets)
+    // - /assets/* (static assets)
+    // - /static/* (static files)
+    
+    Response::ok(&format!("API GET for: {}", path))
+}
+
+//  BETTER - Use specific paths when possible
+#[http(method = "GET", path = "/api/status")]
+fn api_status(&mut self) -> Response {
+    Response::ok("API Status")
+}
+```
+
+**Why:** The framework automatically excludes UI-reserved paths from catch-all GET handlers to prevent conflicts with the frontend. You'll see a compile-time warning for overly broad GET handlers.
+
+**UI Reserved Paths:**
+- `/` - Root UI path
+- `/ui/*` - UI assets and routes
+- `/assets/*` - Static assets  
+- `/static/*` - Static files
+
+**Solution:** Use specific paths or implement manual path filtering in your handlers.
+
 #### **Performance Considerations:**
 
 - **Body parsing overhead:** Every parameterized request requires JSON deserialization
@@ -785,6 +825,7 @@ fn user_handler(&mut self, user: User) -> User {
 
 **Optimization tips:**
 - Use parameter-less handlers for high-frequency endpoints (health checks, metrics)
+- Use specific paths instead of catch-all handlers when possible
 - Batch multiple operations into single handlers when possible
 - Consider caching for expensive operations within handlers
 

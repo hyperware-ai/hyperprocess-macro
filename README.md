@@ -167,66 +167,137 @@ fn get_status(&mut self) -> String {
 
 The function arguments and the return values _have_ to be serializable with `Serde`.
 
-#### HTTP Method Support
+#### HTTP Method Support and Smart Routing
 
-The `#[http]` attribute supports all HTTP methods by default, or you can specify specific methods:
+The `#[http]` attribute supports intelligent routing with priority-based matching:
 
 ```rust
-// Handle ALL HTTP methods
-#[http]
-fn handle_all_methods(&mut self, request_data: RequestData) -> Response {
-    // Access the current path with get_path()
-    // Access query parameters with get_query_params()
-    Response::ok()
+// Specific path handlers (highest priority)
+#[http(method = "GET", path = "/api/users")]
+fn list_users(&mut self) -> Vec<User> {
+    // Matches ONLY GET /api/users - no request body needed
+    self.users.clone()
 }
 
-// Handle only specific methods
-#[http(method = "GET", path = "/api/items")]
-fn list_items(&mut self) -> Vec<Item> {
-    // Parameter-less handlers MUST specify a path
-    // This only handles GET requests to /api/items
-    self.items.clone()
+#[http(method = "POST", path = "/api/users")]
+async fn create_user(&mut self, user: CreateUser) -> Result<User, String> {
+    // Matches POST /api/users with {"CreateUser": {...}} body
+    let new_user = User::from(user);
+    self.users.push(new_user.clone());
+    Ok(new_user)
+}
+
+// Dynamic method-only handlers (medium priority)
+#[http(method = "GET")]
+fn handle_get_fallback(&mut self) -> ApiResponse {
+    let path = get_path().unwrap_or_default();
+    match path.as_str() {
+        p if p.starts_with("/api/") => ApiResponse::new(&format!("API GET for {}", p)),
+        _ => ApiResponse::new("General GET handler")
+    }
 }
 
 #[http(method = "POST")]
-async fn create_item(&mut self, item: NewItem) -> ItemResponse {
-    // Handlers with parameters can omit the path
-    // They are matched by deserializing the request body
-    self.items.push(item);
-    ItemResponse { success: true }
+async fn handle_post_with_data(&mut self, data: PostData) -> Result<String, String> {
+    let path = get_path().unwrap_or_default();
+    // This handles POST to any path (except those with specific handlers)
+    // Expects {"HandlePostWithData": {...}} in request body
+    Ok(format!("Processed POST to {} with data", path))
 }
 
-#[http(method = "PUT", path = "/api/item")]
-fn update_item(&mut self, item: UpdateItem) -> Result<Item, String> {
-    // Handlers with parameters can also specify a path for clarity
-    // ...
-}
-
-#[http(method = "DELETE", path = "/api/item")]
-fn delete_item(&mut self) -> Result<(), String> {
-    // DELETE often has no body, so must specify path
-    let params = get_query_params();
-    let id = params.and_then(|p| p.get("id")?.parse().ok())?;
-    // ...
+// Ultimate fallback (lowest priority)
+#[http]
+fn handle_any_method(&mut self) -> Response {
+    let method = get_http_method().unwrap_or_default();
+    let path = get_path().unwrap_or_default();
+    Response::new(&format!("Catch-all: {} {}", method, path))
 }
 ```
 
 **Supported Methods**: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`
 
-**Default Behavior**: 
-- `#[http]` without parameters accepts ALL HTTP methods
-- `#[http(method = "GET")]` accepts only GET requests
+### Smart Routing System 
 
-**Important Requirements**:
-- **Parameter-less handlers**: Can optionally specify a `path` attribute for exact path matching (e.g., `#[http(method = "GET", path = "/api/users")]`)
-- **Handlers without path**: Use `get_path()` and `get_http_method()` inside the handler to determine routing logic
-- **Handlers with parameters**: Path is optional; they are matched by deserializing the request body
+The framework now uses intelligent priority-based routing that automatically chooses the best handler based on the request:
 
-**Routing System**:
-- **Parameter-less handlers**: Matched first by path and HTTP method
-- **Handlers with parameters**: Matched by deserializing the request body when no parameter-less handler matches
-- If a request body cannot be deserialized to match any handler, a 400 Bad Request is returned
-- The framework returns `405 Method Not Allowed` if a request uses a method not accepted by the handler
+#### **Priority Logic:**
+
+1. **Has Request Body** → Tries parameterized handlers first
+   - Deserializes body to determine the correct handler 
+   - Falls back to parameter-less handlers if deserialization fails
+
+2. **No Request Body** → Tries parameter-less handlers first
+   - Routes based on path and method matching
+   - Never attempts body deserialization for performance
+
+#### **Two-Phase Matching:**
+
+**Phase 1: Direct Path/Method Matching**
+```rust
+// These are matched instantly without body parsing
+#[http(method = "GET", path = "/health")]
+fn health_check(&mut self) -> &'static str { "OK" }
+
+#[http(method = "DELETE", path = "/api/users")]  
+fn delete_all_users(&mut self) -> Result<String, String> {
+    // DELETE requests typically have no body
+    self.users.clear();
+    Ok("All users deleted".to_string())
+}
+```
+
+**Phase 2: Body-Based Handler Discovery**
+```rust
+// These are matched by deserializing the request body
+#[http(method = "POST")]
+async fn create_item(&mut self, item: NewItem) -> ItemResponse {
+    // Expects: {"CreateItem": {"name": "...", "price": 123}}
+    // Body deserialization determines this is the right handler
+    self.items.push(item.into());
+    ItemResponse { success: true }
+}
+
+#[http(method = "POST")]
+async fn update_settings(&mut self, settings: UpdateSettings) -> Result<String, String> {
+    // Expects: {"UpdateSettings": {...}}
+    // Different POST handler - body content determines routing
+    self.apply_settings(settings)?;
+    Ok("Settings updated".to_string())
+}
+```
+
+#### **Context Preservation in Async Handlers:**
+
+The framework automatically preserves request context in async handlers:
+
+```rust
+#[http(method = "POST")]
+async fn async_handler(&mut self, data: MyData) -> Result<String, String> {
+    // get_path() and get_http_method() work correctly in async handlers!
+    let path = get_path().unwrap_or_default();
+    let method = get_http_method().unwrap_or_default();
+    
+    // Make async calls to other services
+    let result = external_api_call(data).await?;
+    
+    Ok(format!("Processed {} {} with result: {}", method, path, result))
+}
+```
+
+**Routing Priority Examples:**
+
+```rust
+// Request: POST /api/upload (with body)
+// 1. ✅ Tries: create_item handler if body matches {"CreateItem": ...}
+// 2. ✅ Tries: update_settings handler if body matches {"UpdateSettings": ...}  
+// 3. ✅ Falls back to: handle_post_with_data for unmatched bodies
+// 4. ✅ Ultimate fallback: handle_any_method
+
+// Request: GET /api/users (no body)
+// 1. ✅ Tries: list_users (exact path match)
+// 2. ✅ Falls back to: handle_get_fallback (method-only match)
+// 3. ✅ Ultimate fallback: handle_any_method
+```
 
 #### Path-Specific Routing
 
@@ -499,9 +570,36 @@ The macro generates detailed logging for all operations:
 // Set current_http_method to: Some("GET")
 ```
 
-### Request Deserialization Errors
+### Enhanced Error Handling (New!)
 
-When request bodies don't match handler expectations, you get helpful error messages:
+The framework now provides much more detailed error messages for debugging:
+
+#### **Request Body Parsing Errors:**
+
+```
+// Wrong handler name
+Invalid request format. Expected one of the parameterized handler formats, 
+but got: {"WrongHandler":{"message":"test"}}
+
+// Invalid JSON syntax
+Invalid JSON in request body. Expected: {"CreateUser":[ ...parameters... ]}. 
+Parse error: expected value at line 1 column 1
+
+// Empty body for parameterized handler
+Request body is empty. This handler expects a JSON object with the handler name and parameters.
+```
+
+#### **Handler-Specific Errors:**
+
+```rust
+// If a parameterized handler expects a body but doesn't get one:
+POST /api/users → "Handler CreateUser requires a request body"
+
+// If no handler matches the method + path combination:
+PUT /nonexistent → "No handler found for PUT /nonexistent"
+```
+
+#### **Development Tips:**
 
 ```
 Failed to deserialize HTTP request into HPMRequest enum.
@@ -510,13 +608,14 @@ Path: /api/users
 Method: POST
 Body received:
 {
-  "createuser": "john_doe"
+  "createuser": "john_doe"  // ❌ Wrong case! Should be "CreateUser"
 }
 
 Debugging tips:
-- Check that your request body matches one of the expected handler parameter types
-- For handlers with parameters, the JSON should be in format {"HandlerName": parameter_value}
-- For parameter-less handlers, use get_path() and get_http_method() inside handlers to access request context
+- Handler names are converted to CamelCase: create_user → CreateUser
+- JSON keys are case-sensitive: use exact CamelCase handler names
+- For handlers with parameters, use format {"HandlerName": parameter_value}
+- For parameter-less handlers, use get_path() and get_http_method() for routing
 ```
 
 ### Compile-Time Validation
@@ -550,22 +649,195 @@ Use these functions to access request context within handlers:
 | `get_query_params()` | `Option<HashMap<String, String>>` | Query parameters |
 | `source()` | `Address` | Address of the message sender |
 
-### Two-Phase HTTP Routing
+### ⚠️ Known Limitations and Gotchas
 
-Understanding the routing system helps debug request handling issues:
-
-1. **Phase 1: Parameter-less Handlers** - Matched by path and HTTP method
-2. **Phase 2: Body-based Handlers** - Matched by deserializing request body
+#### **Request Body Format Requirements:**
 
 ```rust
-// Phase 1: Direct path/method matching
+// ❌ This won't work - body expects specific JSON format
+POST /api/users
+Content-Type: application/json
+{
+  "name": "John Doe",
+  "email": "john@example.com"
+}
+
+// ✅ This works - body must wrap parameters in handler name
+POST /api/users  
+Content-Type: application/json
+{
+  "CreateUser": {
+    "name": "John Doe", 
+    "email": "john@example.com"
+  }
+}
+```
+
+**Why:** The framework uses the outer JSON key to determine which handler to invoke. This enables multiple handlers to respond to the same HTTP method + path combination.
+
+#### **Handler Name Case Sensitivity:**
+
+```rust
+#[http(method = "POST")]
+async fn create_user(&mut self, user: User) -> Result<String, String> { ... }
+
+// ❌ Won't match - wrong case
+{"create_user": {...}}
+{"createUser": {...}}
+
+// ✅ Will match - exact CamelCase
+{"CreateUser": {...}}
+```
+
+**Solution:** Always use exact CamelCase conversion: `snake_case` → `CamelCase`
+
+#### **Async Context Limitations:**
+
+```rust
+#[http(method = "POST")]
+async fn async_handler(&mut self, data: MyData) -> String {
+    // ✅ Works - context is preserved by the framework
+    let path = get_path().unwrap_or_default();
+    
+    // ⚠️ Potential issue - long-running tasks might lose context
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let path2 = get_path(); // May be None if context expires
+    
+    format!("Path: {}", path)
+}
+```
+
+**Why:** The framework preserves context by capturing it before async execution, but very long-running tasks might exceed context lifetime.
+
+#### **Query Parameter Encoding:**
+
+```rust
+// URL: /api/search?q=hello%20world&tags=rust,web
+let params = get_query_params().unwrap();
+
+// ❌ Raw values - URL encoding not automatically decoded
+assert_eq!(params.get("q"), Some("hello%20world")); // Still encoded
+
+// ✅ Manual decoding needed for special characters
+let query = params.get("q")
+    .map(|s| urlencoding::decode(s).unwrap().into_owned())
+    .unwrap_or_default(); // "hello world"
+```
+
+**Solution:** Use a URL decoding library for complex query parameters.
+
+#### **No Built-in Content Negotiation:**
+
+```rust
+#[http(method = "POST")]
+fn upload_file(&mut self, data: FileData) -> String {
+    // ❌ Only handles JSON - no multipart/form-data, XML, etc.
+    // Framework always expects JSON body format
+}
+```
+
+**Workaround:** Use parameter-less handlers and manually parse request bodies:
+
+```rust
+#[http(method = "POST", path = "/upload")]
+fn handle_file_upload(&mut self) -> Result<String, String> {
+    // Get raw request body and parse manually
+    // Implementation depends on your specific needs
+}
+```
+
+#### **Single Handler Per Variant:**
+
+```rust
+// ❌ This won't compile - duplicate handler names become same variant
+#[http(method = "POST")]
+fn create_user(&mut self, user: User) -> User { ... }
+
+#[http(method = "PUT")] 
+fn create_user(&mut self, user: User) -> User { ... } // ERROR: Duplicate CreateUser variant
+```
+
+**Solution:** Use different method names or combine logic:
+
+```rust
+#[http(method = "POST")]
+fn create_user(&mut self, user: User) -> User { ... }
+
+#[http(method = "PUT")]
+fn update_user(&mut self, user: User) -> User { ... }
+
+// Or combine with method checking:
+#[http]
+fn user_handler(&mut self, user: User) -> User {
+    match get_http_method().as_deref() {
+        Some("POST") => self.create_user_impl(user),
+        Some("PUT") => self.update_user_impl(user), 
+        _ => panic!("Unsupported method")
+    }
+}
+```
+
+#### **Performance Considerations:**
+
+- **Body parsing overhead:** Every parameterized request requires JSON deserialization
+- **Context preservation:** Async handlers have slight overhead from context capture/restore
+- **Priority matching:** Requests with bodies try parameterized handlers first, which may be slower
+
+**Optimization tips:**
+- Use parameter-less handlers for high-frequency endpoints (health checks, metrics)
+- Batch multiple operations into single handlers when possible
+- Consider caching for expensive operations within handlers
+
+### Two-Phase HTTP Routing (Updated!)
+
+The routing system now uses **intelligent request-body-aware routing**:
+
+#### **Smart Phase Selection:**
+
+**For requests WITH body data:**
+1. **Phase 1: Body Deserialization** - Tries to deserialize body to find matching parameterized handler
+2. **Phase 2: Parameter-less Fallback** - Falls back to parameter-less handlers if deserialization fails
+
+**For requests WITHOUT body data:**
+1. **Phase 1: Direct Matching** - Matches parameter-less handlers by path and HTTP method
+2. **Phase 2: Not Used** - No body parsing attempted (performance optimization)
+
+#### **Routing Flow Examples:**
+
+```rust
+// High-priority specific handlers
 #[http(method = "GET", path = "/health")]
 fn health_check(&mut self) -> &'static str { "OK" }
 
-// Phase 2: Body deserialization matching  
+#[http(method = "POST", path = "/api/users")]
+async fn create_specific_user(&mut self, user: NewUser) -> User { ... }
+
+// Medium-priority dynamic handlers  
 #[http(method = "POST")]
-fn create_user(&mut self, user: NewUser) -> User { ... }
+async fn create_general(&mut self, data: CreateData) -> Response { ... }
+
+// Low-priority catch-all
+#[http]
+fn catch_all(&mut self) -> Response { ... }
 ```
+
+**Request: `GET /health` (no body)**
+1. ✅ Matches `health_check` directly (exact path + method)
+2. ❌ No body parsing attempted
+
+**Request: `POST /api/users` with body `{"CreateSpecificUser": {...}}`**  
+1. ✅ Matches `create_specific_user` (path + method + body deserialization)
+2. ❌ No fallback needed
+
+**Request: `POST /api/items` with body `{"CreateGeneral": {...}}`**
+1. ❌ No exact path match for `/api/items`
+2. ✅ Deserializes body → matches `create_general` (method + body)
+
+**Request: `PUT /anything` (no body)**
+1. ❌ No parameter-less handler for `PUT /anything`
+2. ✅ Matches `catch_all` handler
+
+This intelligent routing ensures optimal performance by avoiding unnecessary body parsing for requests without bodies, while providing maximum flexibility for complex routing scenarios.
 
 ## Common Patterns and Best Practices
 

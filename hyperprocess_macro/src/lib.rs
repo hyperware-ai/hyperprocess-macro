@@ -1288,21 +1288,22 @@ fn generate_message_handlers(
             quote! { &current_path == #path }
         } else {
             // Dynamic routing: match any path EXCEPT those with specific handlers AND UI reserved paths
-            let is_get_handler = handler.http_methods.contains(&"GET".to_string());
-            if is_get_handler {
-                // For GET handlers, exclude UI reserved paths to prevent conflicts with the frontend
-                quote! {
-                    ![#(#specific_paths),*].contains(&current_path.as_str())
-                    //![#(#specific_paths),*].contains(&current_path.as_str()) &&
-                    //!current_path.starts_with("/ui") &&
-                    //current_path != "/" &&
-                    //!current_path.starts_with("/assets") &&
-                    //!current_path.starts_with("/static")
-                }
-            } else {
-                // For non-GET handlers, only exclude specific paths (UI paths are safe)
+            //let is_get_handler = handler.http_methods.contains(&"GET".to_string());
+            //if is_get_handler {
+            //    // For GET handlers, exclude UI reserved paths to prevent conflicts with the frontend
+            //    quote! {
+            //        ![#(#specific_paths),*].contains(&current_path.as_str())
+            //        //![#(#specific_paths),*].contains(&current_path.as_str()) &&
+            //        //!current_path.starts_with("/ui") &&
+            //        //current_path != "/" &&
+            //        //!current_path.starts_with("/assets") &&
+            //        //!current_path.starts_with("/static")
+            //    }
+            //} else {
+            //    // For non-GET handlers, only exclude specific paths (UI paths are safe)
+            //    quote! { ![#(#specific_paths),*].contains(&current_path.as_str()) }
+            //}
                 quote! { ![#(#specific_paths),*].contains(&current_path.as_str()) }
-            }
         };
         let methods = &handler.http_methods;
         let method_check = quote! { [#(#methods),*].contains(&http_method.as_str()) };

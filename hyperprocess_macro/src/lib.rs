@@ -945,20 +945,9 @@ fn generate_async_handler_arm(
         // Updated pattern to match struct variant with no fields
         quote! {
             HPMRequest::#variant_name{} => {
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
-
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
-                    hyperware_app_common::APP_HELPERS.with(|ctx| {
-                        let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
-                    });
-
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
@@ -970,21 +959,9 @@ fn generate_async_handler_arm(
         quote! {
             HPMRequest::#variant_name(param) => {
                 let param_captured = param;  // Capture param before moving into async block
-
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
-
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
-                    hyperware_app_common::APP_HELPERS.with(|ctx| {
-                        let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
-                    });
-
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(param_captured).await };
                     #response_handling
@@ -1006,21 +983,9 @@ fn generate_async_handler_arm(
             HPMRequest::#variant_name(#(#param_names),*) => {
                 // Capture all parameters before moving into async block
                 #(#capture_statements)*
-
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
-
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
-                    hyperware_app_common::APP_HELPERS.with(|ctx| {
-                        let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
-                    });
-
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(#(#captured_names),*).await };
                     #response_handling

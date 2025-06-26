@@ -777,7 +777,7 @@ fn generate_request_response_enums(
     // Parameter-less handlers are dispatched directly in Phase 1, not through enum deserialization
     let request_variants = function_metadata
         .iter()
-        .filter(|func| !func.params.is_empty()) // Only include handlers with parameters
+        //.filter(|func| !func.params.is_empty()) // Only include handlers with parameters
         .map(|func| {
             let variant_name = format_ident!("{}", &func.variant_name);
             generate_enum_variant(&variant_name, &func.params)

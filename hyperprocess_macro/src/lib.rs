@@ -827,7 +827,7 @@ fn generate_enum_variant(
     if params.is_empty() {
         // Changed to a struct variant with no fields for functions with no parameters
         // This matches the JSON format {"VariantName": {}} sent by the client
-        quote! { #variant_name{} }
+        quote! { #variant_name }
     } else if params.len() == 1 {
         // Simple tuple variant for single parameter
         let param_type = &params[0];

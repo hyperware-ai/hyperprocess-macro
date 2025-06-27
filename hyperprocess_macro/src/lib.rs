@@ -1309,18 +1309,8 @@ fn generate_message_handlers(
         let handler_body = if handler.is_async {
             quote! {
                 // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
-
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
-                    hyperware_app_common::APP_HELPERS.with(|ctx| {
-                        let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
-                    });
-
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
                 }

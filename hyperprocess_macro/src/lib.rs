@@ -1609,7 +1609,7 @@ fn generate_component_impl(
     // Extract values from args for use in the quote macro
     let name = &args.name;
     let endpoints = &args.endpoints;
-    let _save_config = &args.save_config;
+    let save_config = &args.save_config;
     let wit_world = &args.wit_world;
 
     let icon = match &args.icon {
@@ -1632,6 +1632,8 @@ fn generate_component_impl(
         }
         None => quote! { None },
     };
+
+    let save_config = &args.save_config;
 
     let init_method_ident = &init_method_details.identifier;
     let init_method_call = &init_method_details.call;
@@ -1683,6 +1685,11 @@ fn generate_component_impl(
                 // Initialize our state
                 let mut state = hyperware_app_common::initialize_state::<#self_ty>();
 
+                // Set to persist state according to user setting
+                hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                    ctx.borrow_mut().hidden_state = Some(hyperware_app_common::HiddenState::new(save_config));
+                });
+
                 // Set up necessary components
                 let app_name = #name;
                 let app_icon = #icon;
@@ -1719,6 +1726,11 @@ fn generate_component_impl(
                             hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 ctx.borrow_mut().current_message = Some(message.clone());
                             });
+
+                            // Store old state if needed (for OnDiff save option)
+                            // This only stores if old_state is None (first time or after a save)
+                            hyperware_app_common::store_old_state(&state);
+
                             match message {
                                 hyperware_process_lib::Message::Response { body, context, .. } => {
                                     let correlation_id = context

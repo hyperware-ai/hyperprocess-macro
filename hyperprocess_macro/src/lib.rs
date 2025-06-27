@@ -1722,7 +1722,7 @@ fn generate_component_impl(
                                             let ctx_mut = ctx.borrow_mut();
                                             ctx_mut.current_path = None;
                                             ctx_mut.current_http_method = None;
-                                            ctx_mut.response_headers = HashMap::new();
+                                            ctx_mut.response_headers = std::collections::HashMap::new();
                                         });
                                     } else if message.is_local() {
                                         handle_local_message(&mut state, message);

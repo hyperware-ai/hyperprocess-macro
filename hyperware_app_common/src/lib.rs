@@ -38,6 +38,7 @@ thread_local! {
         current_server: None,
         current_message: None,
         current_http_method: None,
+        response_headers: HashMap::new(),
     });
 }
 
@@ -51,6 +52,7 @@ pub struct AppHelpers {
     pub current_server: Option<*mut HttpServer>,
     pub current_message: Option<Message>,
     pub current_http_method: Option<String>,
+    pub response_headers: HashMap<String, String>,
 }
 
 // Access function for the current path
@@ -65,6 +67,27 @@ pub fn get_server() -> Option<&'static mut HttpServer> {
 
 pub fn get_http_method() -> Option<String> {
     APP_HELPERS.with(|ctx| ctx.borrow().current_http_method.clone())
+}
+
+// Set response headers that will be included in the HTTP response
+pub fn set_response_headers(headers: HashMap<String, String>) {
+    APP_HELPERS.with(|ctx| {
+        ctx.borrow_mut().response_headers = headers;
+    })
+}
+
+// Add a single response header
+pub fn add_response_header(key: String, value: String) {
+    APP_HELPERS.with(|ctx| {
+        ctx.borrow_mut().response_headers.insert(key, value);
+    })
+}
+
+// Clear all response headers
+pub fn clear_response_headers() {
+    APP_HELPERS.with(|ctx| {
+        ctx.borrow_mut().response_headers.clear();
+    })
 }
 
 // Access function for the source address of the current message

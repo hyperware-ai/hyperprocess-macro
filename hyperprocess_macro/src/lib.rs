@@ -1633,8 +1633,6 @@ fn generate_component_impl(
         None => quote! { None },
     };
 
-    let save_config = &args.save_config;
-
     let init_method_ident = &init_method_details.identifier;
     let init_method_call = &init_method_details.call;
     let ws_method_call = &ws_method_details.call;
@@ -1687,7 +1685,7 @@ fn generate_component_impl(
 
                 // Set to persist state according to user setting
                 hyperware_app_common::APP_CONTEXT.with(|ctx| {
-                    ctx.borrow_mut().hidden_state = Some(hyperware_app_common::HiddenState::new(save_config));
+                    ctx.borrow_mut().hidden_state = Some(hyperware_app_common::HiddenState::new(#save_config));
                 });
 
                 // Set up necessary components

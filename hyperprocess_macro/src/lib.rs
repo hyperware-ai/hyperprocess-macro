@@ -654,17 +654,6 @@ fn analyze_methods(
                     }
                     http_routes.insert(route_key, &func.name);
                 }
-            } else {
-                // Warn about overly broad GET handlers that could interfere with UI
-                if func.http_methods.contains(&"GET".to_string()) && func.params.is_empty() {
-                    eprintln!(
-                        "⚠️  WARNING: Handler '{}' uses #[http(method = \"GET\")] without a specific path.\n\
-                        This will match ALL GET requests except UI paths (/, /ui/, /assets/, /static/).\n\
-                        Consider using a specific path like #[http(method = \"GET\", path = \"/api/items\")] \n\
-                        or implement path filtering inside your handler with get_path().\n",
-                        func.name
-                    );
-                }
             }
             // Method-only handlers (no specific path) are allowed to coexist
             // They can use get_path() at runtime to implement custom routing logic
@@ -945,18 +934,20 @@ fn generate_async_handler_arm(
         // Updated pattern to match struct variant with no fields
         quote! {
             HPMRequest::#variant_name{} => {
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
+                // Capture HTTP context before entering async block
+                let (captured_path, captured_method) = hyperware_app_common::APP_HELPERS.with(|ctx| {
+                    let ctx_borrow = ctx.borrow();
+                    (ctx_borrow.current_path.clone(), ctx_borrow.current_http_method.clone())
+                });
                 
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
+                    // Restore HTTP context in the async task
                     hyperware_app_common::APP_HELPERS.with(|ctx| {
                         let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
+                        ctx_mut.current_path = captured_path;
+                        ctx_mut.current_http_method = captured_method;
                     });
                     
                     // Inside the async block, use the pointer to access state
@@ -971,18 +962,20 @@ fn generate_async_handler_arm(
             HPMRequest::#variant_name(param) => {
                 let param_captured = param;  // Capture param before moving into async block
                 
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
+                // Capture HTTP context before entering async block
+                let (captured_path, captured_method) = hyperware_app_common::APP_HELPERS.with(|ctx| {
+                    let ctx_borrow = ctx.borrow();
+                    (ctx_borrow.current_path.clone(), ctx_borrow.current_http_method.clone())
+                });
                 
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
+                    // Restore HTTP context in the async task
                     hyperware_app_common::APP_HELPERS.with(|ctx| {
                         let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
+                        ctx_mut.current_path = captured_path;
+                        ctx_mut.current_http_method = captured_method;
                     });
                     
                     // Inside the async block, use the pointer to access state
@@ -1007,18 +1000,20 @@ fn generate_async_handler_arm(
                 // Capture all parameters before moving into async block
                 #(#capture_statements)*
                 
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
+                // Capture HTTP context before entering async block
+                let (captured_path, captured_method) = hyperware_app_common::APP_HELPERS.with(|ctx| {
+                    let ctx_borrow = ctx.borrow();
+                    (ctx_borrow.current_path.clone(), ctx_borrow.current_http_method.clone())
+                });
                 
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
+                    // Restore HTTP context in the async task
                     hyperware_app_common::APP_HELPERS.with(|ctx| {
                         let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
+                        ctx_mut.current_path = captured_path;
+                        ctx_mut.current_http_method = captured_method;
                     });
                     
                     // Inside the async block, use the pointer to access state
@@ -1266,7 +1261,9 @@ fn generate_message_handlers(
                 }
                 
                 hyperware_app_common::APP_HELPERS.with(|ctx| {
-                    ctx.borrow_mut().current_path = None;
+                    let mut ctx_mut = ctx.borrow_mut();
+                    ctx_mut.current_path = None;
+                    ctx_mut.current_http_method = None;
                 });
                 return;
             }
@@ -1278,21 +1275,8 @@ fn generate_message_handlers(
         let path_check = if let Some(path) = &handler.http_path {
             quote! { &current_path == #path }
         } else {
-            // Dynamic routing: match any path EXCEPT those with specific handlers AND UI reserved paths
-            let is_get_handler = handler.http_methods.contains(&"GET".to_string());
-            if is_get_handler {
-                // For GET handlers, exclude UI reserved paths to prevent conflicts with the frontend
-                quote! { 
-                    ![#(#specific_paths),*].contains(&current_path.as_str()) && 
-                    !current_path.starts_with("/ui") && 
-                    current_path != "/" &&
-                    !current_path.starts_with("/assets") &&
-                    !current_path.starts_with("/static")
-                }
-            } else {
-                // For non-GET handlers, only exclude specific paths (UI paths are safe)
-                quote! { ![#(#specific_paths),*].contains(&current_path.as_str()) }
-            }
+            // Dynamic routing: match any path EXCEPT those with specific handlers
+            quote! { ![#(#specific_paths),*].contains(&current_path.as_str()) }
         };
         let methods = &handler.http_methods;
         let method_check = quote! { [#(#methods),*].contains(&http_method.as_str()) };
@@ -1320,17 +1304,19 @@ fn generate_message_handlers(
 
         let handler_body = if handler.is_async {
             quote! {
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
+                // Capture HTTP context before entering async block
+                let (captured_path, captured_method) = hyperware_app_common::APP_HELPERS.with(|ctx| {
+                    let ctx_borrow = ctx.borrow();
+                    (ctx_borrow.current_path.clone(), ctx_borrow.current_http_method.clone())
+                });
                 
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
+                    // Restore HTTP context in the async task
                     hyperware_app_common::APP_HELPERS.with(|ctx| {
                         let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
+                        ctx_mut.current_path = captured_path;
+                        ctx_mut.current_http_method = captured_method;
                     });
                     
                     let result = unsafe { (*state_ptr).#fn_name().await };
@@ -1353,7 +1339,9 @@ fn generate_message_handlers(
                 hyperware_process_lib::logging::debug!("Matched parameter-less handler {} for {} {}", stringify!(#fn_name), http_method, current_path);
                 #handler_body
                 hyperware_app_common::APP_HELPERS.with(|ctx| {
-                    ctx.borrow_mut().current_path = None;
+                    let mut ctx_mut = ctx.borrow_mut();
+                    ctx_mut.current_path = None;
+                    ctx_mut.current_http_method = None;
                 });
                 return;
             }
@@ -1407,8 +1395,6 @@ fn generate_message_handlers(
                                 let mut ctx_mut = ctx.borrow_mut();
                                 ctx_mut.current_path = Some(current_path.clone());
                                 ctx_mut.current_http_method = Some(http_method.clone());
-                                hyperware_process_lib::logging::debug!("Set current_path to: {:?}", ctx_mut.current_path);
-                                hyperware_process_lib::logging::debug!("Set current_http_method to: {:?}", ctx_mut.current_http_method);
                                 // TODO: Add query params and any other needed fields
                                 //ctx_mut.http_query_params = http_request.query_params.clone();
                             });
@@ -1431,9 +1417,11 @@ fn generate_message_handlers(
                                                 hyperware_app_common::maybe_save_state(&mut *state);
                                             }
                                             hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                                ctx.borrow_mut().current_path = None;
-                                            });
-                                            return;
+                                            let mut ctx_mut = ctx.borrow_mut();
+                                            ctx_mut.current_path = None;
+                                             ctx_mut.current_http_method = None;
+                                             });
+                                        return;
                                         },
                                         Err(e) => {
                                             let error_details = if blob.bytes.is_empty() {
@@ -1452,16 +1440,18 @@ fn generate_message_handlers(
                                             
                                             hyperware_process_lib::logging::error!("Failed to parse request body for {} {}: {}", http_method, current_path, error_details);
                                             
-                                            // Send appropriate error response instead of falling through
-                                            hyperware_process_lib::http::server::send_response(
-                                                hyperware_process_lib::http::StatusCode::BAD_REQUEST,
-                                                None,
-                                                error_details.into_bytes()
-                                            );
-                                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                                ctx.borrow_mut().current_path = None;
-                                            });
-                                            return;
+                                                                        // Send appropriate error response instead of falling through
+                            hyperware_process_lib::http::server::send_response(
+                                hyperware_process_lib::http::StatusCode::BAD_REQUEST,
+                                None,
+                                error_details.into_bytes()
+                            );
+                            hyperware_app_common::APP_HELPERS.with(|ctx| {
+                                let mut ctx_mut = ctx.borrow_mut();
+                                ctx_mut.current_path = None;
+                                ctx_mut.current_http_method = None;
+                            });
+                            return;
                                         }
                                     }
                                 }
@@ -1479,7 +1469,9 @@ fn generate_message_handlers(
                                 format!("No handler found for {} {}", http_method, current_path).into_bytes(),
                             );
                             hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                ctx.borrow_mut().current_path = None;
+                                let mut ctx_mut = ctx.borrow_mut();
+                                ctx_mut.current_path = None;
+                                ctx_mut.current_http_method = None;
                             });
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
@@ -1502,7 +1494,6 @@ fn generate_message_handlers(
                             unsafe {
                                 hyperware_app_common::maybe_save_state(&mut *state);
                             }
-                            hyperware_process_lib::logging::debug!("WebSocket message processed successfully");
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketOpen { path, channel_id } => {
                             hyperware_process_lib::logging::debug!("WebSocket connection opened on path '{}' with channel {}", path, channel_id);
@@ -1536,7 +1527,6 @@ fn generate_message_handlers(
             // Process the local request based on our handlers (now including both local and remote handlers)
             match serde_json::from_slice::<HPMRequest>(message.body()) {
                 Ok(request) => {
-                    hyperware_process_lib::logging::debug!("Successfully deserialized local request");
                     unsafe {
                         // Match on the request variant and call the appropriate handler
                         // Now using combined local_and_remote handlers
@@ -1545,7 +1535,6 @@ fn generate_message_handlers(
                         // Save state if needed
                         hyperware_app_common::maybe_save_state(&mut *state);
                     }
-                    hyperware_process_lib::logging::debug!("Local message processed successfully");
                 },
                 Err(e) => {
                     let raw_body = String::from_utf8_lossy(message.body());

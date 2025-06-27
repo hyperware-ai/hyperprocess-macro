@@ -1719,7 +1719,7 @@ fn generate_component_impl(
                                     if message.is_local() && message.source().process == "http-server:distro:sys" {
                                         handle_http_server_message(&mut state, message);
                                         hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                            let ctx_mut = ctx.borrow_mut();
+                                            let mut ctx_mut = ctx.borrow_mut();
                                             ctx_mut.current_path = None;
                                             ctx_mut.current_http_method = None;
                                             ctx_mut.response_headers = std::collections::HashMap::new();

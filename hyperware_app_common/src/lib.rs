@@ -187,8 +187,8 @@ pub enum AppSendError {
 }
 
 pub async fn sleep(sleep_ms: u64) -> Result<(), AppSendError> {
-    let timer_request = Request::to("our@timer:distro:sys")
-        .body(timer::TimerAction(sleep_ms))
+    let timer_request = Request::to(("our", "timer", "distro", "sys"))
+        .body(timer::TimerAction::SetTimer(sleep_ms))
         .expects_response((sleep_ms / 1_000) + 1);
 
     send(timer_request).await

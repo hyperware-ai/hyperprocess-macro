@@ -777,7 +777,7 @@ fn generate_request_response_enums(
     // Parameter-less handlers are dispatched directly in Phase 1, not through enum deserialization
     let request_variants = function_metadata
         .iter()
-        .filter(|func| !func.params.is_empty()) // Only include handlers with parameters
+        //.filter(|func| !func.params.is_empty()) // Only include handlers with parameters
         .map(|func| {
             let variant_name = format_ident!("{}", &func.variant_name);
             generate_enum_variant(&variant_name, &func.params)
@@ -827,7 +827,7 @@ fn generate_enum_variant(
     if params.is_empty() {
         // Changed to a struct variant with no fields for functions with no parameters
         // This matches the JSON format {"VariantName": {}} sent by the client
-        quote! { #variant_name{} }
+        quote! { #variant_name }
     } else if params.len() == 1 {
         // Simple tuple variant for single parameter
         let param_type = &params[0];
@@ -923,11 +923,25 @@ fn generate_response_handling(
             quote! {
                 // Instead of wrapping in HPMResponse enum, directly serialize the result
                 let response_bytes = serde_json::to_vec(&result).unwrap();
+
+                // Get headers from APP_HELPERS if any are set
+                let headers_opt = hyperware_app_common::APP_HELPERS.with(|ctx| {
+                    let helpers = ctx.borrow();
+                    if helpers.response_headers.is_empty() {
+                        None
+                    } else {
+                        Some(helpers.response_headers.clone())
+                    }
+                });
+
                 hyperware_process_lib::http::server::send_response(
                     hyperware_process_lib::http::StatusCode::OK,
-                    None,
+                    headers_opt,
                     response_bytes
                 );
+
+                // Clear headers after sending response
+                hyperware_app_common::clear_response_headers();
             }
         }
     }
@@ -1238,10 +1252,6 @@ fn generate_message_handlers(
                         format!("Handler {} requires a request body", stringify!(#fn_name)).into_bytes()
                     );
                 }
-
-                hyperware_app_common::APP_HELPERS.with(|ctx| {
-                    ctx.borrow_mut().current_path = None;
-                });
                 return;
             }
         }
@@ -1271,28 +1281,31 @@ fn generate_message_handlers(
                     return;
                 }
             };
+
+            // Get headers from APP_HELPERS if any are set
+            let headers_opt = hyperware_app_common::APP_HELPERS.with(|ctx| {
+                let helpers = ctx.borrow();
+                if helpers.response_headers.is_empty() {
+                    None
+                } else {
+                    Some(helpers.response_headers.clone())
+                }
+            });
+
             hyperware_process_lib::http::server::send_response(
                 hyperware_process_lib::http::StatusCode::OK,
-                None,
+                headers_opt,
                 response_bytes
             );
+
+            // Clear headers after sending response
+            hyperware_app_common::clear_response_headers();
         };
 
         let handler_body = if handler.is_async {
             quote! {
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
-
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
-                    hyperware_app_common::APP_HELPERS.with(|ctx| {
-                        let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
-                    });
-
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
                 }
@@ -1312,9 +1325,6 @@ fn generate_message_handlers(
             if #path_check && #method_check {
                 hyperware_process_lib::logging::debug!("Matched parameter-less handler {} for {} {}", stringify!(#fn_name), http_method, current_path);
                 #handler_body
-                hyperware_app_common::APP_HELPERS.with(|ctx| {
-                    ctx.borrow_mut().current_path = None;
-                });
                 return;
             }
         }
@@ -1390,9 +1400,6 @@ fn generate_message_handlers(
                                                 #http_request_match_arms
                                                 hyperware_app_common::maybe_save_state(&mut *state);
                                             }
-                                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                                ctx.borrow_mut().current_path = None;
-                                            });
                                             return;
                                         },
                                         Err(e) => {
@@ -1418,9 +1425,6 @@ fn generate_message_handlers(
                                                 None,
                                                 error_details.into_bytes()
                                             );
-                                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                                ctx.borrow_mut().current_path = None;
-                                            });
                                             return;
                                         }
                                     }
@@ -1438,9 +1442,6 @@ fn generate_message_handlers(
                                 None,
                                 format!("No handler found for {} {}", http_method, current_path).into_bytes(),
                             );
-                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                ctx.borrow_mut().current_path = None;
-                            });
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
                             hyperware_process_lib::logging::debug!("Received WebSocket message on channel {}, type: {:?}", channel_id, message_type);
@@ -1581,7 +1582,7 @@ fn generate_component_impl(
     // Extract values from args for use in the quote macro
     let name = &args.name;
     let endpoints = &args.endpoints;
-    let _save_config = &args.save_config;
+    let save_config = &args.save_config;
     let wit_world = &args.wit_world;
 
     let icon = match &args.icon {
@@ -1655,6 +1656,11 @@ fn generate_component_impl(
                 // Initialize our state
                 let mut state = hyperware_app_common::initialize_state::<#self_ty>();
 
+                // Set to persist state according to user setting
+                hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                    ctx.borrow_mut().hidden_state = Some(hyperware_app_common::HiddenState::new(#save_config));
+                });
+
                 // Set up necessary components
                 let app_name = #name;
                 let app_icon = #icon;
@@ -1691,6 +1697,11 @@ fn generate_component_impl(
                             hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 ctx.borrow_mut().current_message = Some(message.clone());
                             });
+
+                            // Store old state if needed (for OnDiff save option)
+                            // This only stores if old_state is None (first time or after a save)
+                            hyperware_app_common::store_old_state(&state);
+
                             match message {
                                 hyperware_process_lib::Message::Response { body, context, .. } => {
                                     let correlation_id = context
@@ -1706,6 +1717,12 @@ fn generate_component_impl(
                                 hyperware_process_lib::Message::Request { .. } => {
                                     if message.is_local() && message.source().process == "http-server:distro:sys" {
                                         handle_http_server_message(&mut state, message);
+                                        hyperware_app_common::APP_HELPERS.with(|ctx| {
+                                            let mut ctx_mut = ctx.borrow_mut();
+                                            ctx_mut.current_path = None;
+                                            ctx_mut.current_http_method = None;
+                                            ctx_mut.response_headers = std::collections::HashMap::new();
+                                        });
                                     } else if message.is_local() {
                                         handle_local_message(&mut state, message);
                                     } else {
@@ -1773,7 +1790,7 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
     let http_handlers_with_params: Vec<_> = handlers
         .http
         .iter()
-        .filter(|h| !h.params.is_empty())
+        //.filter(|h| !h.params.is_empty())
         .cloned()
         .collect();
 
@@ -1781,7 +1798,7 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
     // This includes all local and remote handlers, plus HTTP handlers that have parameters.
     let metadata_for_enum: Vec<_> = function_metadata
         .iter()
-        .filter(|f| !f.is_http || !f.params.is_empty())
+        //.filter(|f| !f.is_http || !f.params.is_empty())
         .cloned()
         .collect();
 

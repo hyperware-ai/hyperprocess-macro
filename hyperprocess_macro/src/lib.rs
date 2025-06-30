@@ -1252,10 +1252,6 @@ fn generate_message_handlers(
                         format!("Handler {} requires a request body", stringify!(#fn_name)).into_bytes()
                     );
                 }
-
-                hyperware_app_common::APP_HELPERS.with(|ctx| {
-                    ctx.borrow_mut().current_path = None;
-                });
                 return;
             }
         }
@@ -1308,19 +1304,8 @@ fn generate_message_handlers(
 
         let handler_body = if handler.is_async {
             quote! {
-                // Capture context values before async execution
-                let current_path = hyperware_app_common::get_path();
-                let current_method = hyperware_app_common::get_http_method();
-
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
-                    // Restore context in the async task
-                    hyperware_app_common::APP_HELPERS.with(|ctx| {
-                        let mut ctx_mut = ctx.borrow_mut();
-                        ctx_mut.current_path = current_path;
-                        ctx_mut.current_http_method = current_method;
-                    });
-
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
                 }
@@ -1340,9 +1325,6 @@ fn generate_message_handlers(
             if #path_check && #method_check {
                 hyperware_process_lib::logging::debug!("Matched parameter-less handler {} for {} {}", stringify!(#fn_name), http_method, current_path);
                 #handler_body
-                hyperware_app_common::APP_HELPERS.with(|ctx| {
-                    ctx.borrow_mut().current_path = None;
-                });
                 return;
             }
         }
@@ -1418,9 +1400,6 @@ fn generate_message_handlers(
                                                 #http_request_match_arms
                                                 hyperware_app_common::maybe_save_state(&mut *state);
                                             }
-                                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                                ctx.borrow_mut().current_path = None;
-                                            });
                                             return;
                                         },
                                         Err(e) => {
@@ -1446,9 +1425,6 @@ fn generate_message_handlers(
                                                 None,
                                                 error_details.into_bytes()
                                             );
-                                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                                ctx.borrow_mut().current_path = None;
-                                            });
                                             return;
                                         }
                                     }
@@ -1466,9 +1442,6 @@ fn generate_message_handlers(
                                 None,
                                 format!("No handler found for {} {}", http_method, current_path).into_bytes(),
                             );
-                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                ctx.borrow_mut().current_path = None;
-                            });
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
                             hyperware_process_lib::logging::debug!("Received WebSocket message on channel {}, type: {:?}", channel_id, message_type);
@@ -1744,6 +1717,12 @@ fn generate_component_impl(
                                 hyperware_process_lib::Message::Request { .. } => {
                                     if message.is_local() && message.source().process == "http-server:distro:sys" {
                                         handle_http_server_message(&mut state, message);
+                                        hyperware_app_common::APP_HELPERS.with(|ctx| {
+                                            let mut ctx_mut = ctx.borrow_mut();
+                                            ctx_mut.current_path = None;
+                                            ctx_mut.current_http_method = None;
+                                            ctx_mut.response_headers = std::collections::HashMap::new();
+                                        });
                                     } else if message.is_local() {
                                         handle_local_message(&mut state, message);
                                     } else {

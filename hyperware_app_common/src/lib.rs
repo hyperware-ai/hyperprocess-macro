@@ -191,7 +191,7 @@ pub async fn sleep(sleep_ms: u64) -> Result<(), AppSendError> {
         .body(timer::TimerAction::SetTimer(sleep_ms))
         .expects_response((sleep_ms / 1_000) + 1);
 
-    send(timer_request).await?;
+    let _: Vec<u8> = send(timer_request).await?;
 
     return Ok(());
 }

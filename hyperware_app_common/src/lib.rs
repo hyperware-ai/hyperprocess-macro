@@ -191,7 +191,7 @@ pub async fn sleep(sleep_ms: u64) -> Result<(), AppSendError> {
         .body(timer::TimerAction(sleep_ms))
         .expects_response((sleep_ms / 1_000) + 1);
 
-    send(timer_request)
+    send(timer_request).await
 }
 
 pub async fn send<R>(request: Request) -> Result<R, AppSendError>

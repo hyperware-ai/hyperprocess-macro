@@ -218,7 +218,7 @@ fn handle_any_method(&mut self) -> Response {
 
 ### Smart Routing System 
 
-The framework now uses intelligent priority-based routing that automatically chooses the best handler based on the request:
+The framework uses intelligent priority-based routing that automatically chooses the best handler based on the request:
 
 #### **Priority Logic:**
 
@@ -570,10 +570,6 @@ The macro generates detailed logging for all operations:
 // Set current_http_method to: Some("GET")
 ```
 
-### Enhanced Error Handling (New!)
-
-The framework now provides much more detailed error messages for debugging:
-
 #### **Request Body Parsing Errors:**
 
 ```
@@ -777,45 +773,6 @@ fn user_handler(&mut self, user: User) -> User {
 }
 ```
 
-#### **UI Path Conflicts (Critical!):**
-
-```rust
-// ❌ DANGEROUS - This will prevent UI from loading!
-#[http(method = "GET")]
-fn catch_all_get(&mut self) -> Response {
-    // This would intercept GET / and break the frontend
-    Response::ok("All GET requests")
-}
-
-// ✅ SAFE - Framework automatically excludes UI paths
-#[http(method = "GET")]  
-fn api_get_handler(&mut self) -> Response {
-    let path = get_path().unwrap_or_default();
-    // This will NOT match:
-    // - / (root UI)
-    // - /ui/* (UI assets)
-    // - /assets/* (static assets)
-    // - /static/* (static files)
-    
-    Response::ok(&format!("API GET for: {}", path))
-}
-
-//  BETTER - Use specific paths when possible
-#[http(method = "GET", path = "/api/status")]
-fn api_status(&mut self) -> Response {
-    Response::ok("API Status")
-}
-```
-
-**Why:** The framework automatically excludes UI-reserved paths from catch-all GET handlers to prevent conflicts with the frontend. You'll see a compile-time warning for overly broad GET handlers.
-
-**UI Reserved Paths:**
-- `/` - Root UI path
-- `/ui/*` - UI assets and routes
-- `/assets/*` - Static assets  
-- `/static/*` - Static files
-
-**Solution:** Use specific paths or implement manual path filtering in your handlers.
 
 #### **Performance Considerations:**
 

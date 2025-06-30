@@ -654,17 +654,6 @@ fn analyze_methods(
                     }
                     http_routes.insert(route_key, &func.name);
                 }
-            } else {
-                // Warn about overly broad GET handlers that could interfere with UI
-                if func.http_methods.contains(&"GET".to_string()) && func.params.is_empty() {
-                    eprintln!(
-                        "⚠️  WARNING: Handler '{}' uses #[http(method = \"GET\")] without a specific path.\n\
-                        This will match ALL GET requests except UI paths (/, /ui/, /assets/, /static/).\n\
-                        Consider using a specific path like #[http(method = \"GET\", path = \"/api/items\")] \n\
-                        or implement path filtering inside your handler with get_path().\n",
-                        func.name
-                    );
-                }
             }
             // Method-only handlers (no specific path) are allowed to coexist
             // They can use get_path() at runtime to implement custom routing logic
@@ -1377,8 +1366,6 @@ fn generate_message_handlers(
                                 let mut ctx_mut = ctx.borrow_mut();
                                 ctx_mut.current_path = Some(current_path.clone());
                                 ctx_mut.current_http_method = Some(http_method.clone());
-                                hyperware_process_lib::logging::debug!("Set current_path to: {:?}", ctx_mut.current_path);
-                                hyperware_process_lib::logging::debug!("Set current_http_method to: {:?}", ctx_mut.current_http_method);
                                 // TODO: Add query params and any other needed fields
                                 //ctx_mut.http_query_params = http_request.query_params.clone();
                             });
@@ -1463,7 +1450,6 @@ fn generate_message_handlers(
                             unsafe {
                                 hyperware_app_common::maybe_save_state(&mut *state);
                             }
-                            hyperware_process_lib::logging::debug!("WebSocket message processed successfully");
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketOpen { path, channel_id } => {
                             hyperware_process_lib::logging::debug!("WebSocket connection opened on path '{}' with channel {}", path, channel_id);
@@ -1497,7 +1483,6 @@ fn generate_message_handlers(
             // Process the local request based on our handlers (now including both local and remote handlers)
             match serde_json::from_slice::<HPMRequest>(message.body()) {
                 Ok(request) => {
-                    hyperware_process_lib::logging::debug!("Successfully deserialized local request");
                     unsafe {
                         // Match on the request variant and call the appropriate handler
                         // Now using combined local_and_remote handlers
@@ -1506,7 +1491,6 @@ fn generate_message_handlers(
                         // Save state if needed
                         hyperware_app_common::maybe_save_state(&mut *state);
                     }
-                    hyperware_process_lib::logging::debug!("Local message processed successfully");
                 },
                 Err(e) => {
                     let raw_body = String::from_utf8_lossy(message.body());

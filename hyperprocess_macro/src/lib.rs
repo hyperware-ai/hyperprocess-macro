@@ -1304,7 +1304,6 @@ fn generate_message_handlers(
 
         let handler_body = if handler.is_async {
             quote! {
-                // Capture context values before async execution
                 let state_ptr: *mut #self_ty = state;
                 hyperware_app_common::hyper! {
                     let result = unsafe { (*state_ptr).#fn_name().await };

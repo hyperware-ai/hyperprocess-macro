@@ -923,11 +923,25 @@ fn generate_response_handling(
             quote! {
                 // Instead of wrapping in HPMResponse enum, directly serialize the result
                 let response_bytes = serde_json::to_vec(&result).unwrap();
+
+                // Get headers from APP_HELPERS if any are set
+                let headers_opt = hyperware_app_common::APP_HELPERS.with(|ctx| {
+                    let helpers = ctx.borrow();
+                    if helpers.response_headers.is_empty() {
+                        None
+                    } else {
+                        Some(helpers.response_headers.clone())
+                    }
+                });
+
                 hyperware_process_lib::http::server::send_response(
                     hyperware_process_lib::http::StatusCode::OK,
-                    None,
+                    headers_opt,
                     response_bytes
                 );
+
+                // Clear headers after sending response
+                hyperware_app_common::clear_response_headers();
             }
         }
     }
@@ -1271,11 +1285,25 @@ fn generate_message_handlers(
                     return;
                 }
             };
+
+            // Get headers from APP_HELPERS if any are set
+            let headers_opt = hyperware_app_common::APP_HELPERS.with(|ctx| {
+                let helpers = ctx.borrow();
+                if helpers.response_headers.is_empty() {
+                    None
+                } else {
+                    Some(helpers.response_headers.clone())
+                }
+            });
+
             hyperware_process_lib::http::server::send_response(
                 hyperware_process_lib::http::StatusCode::OK,
-                None,
+                headers_opt,
                 response_bytes
             );
+
+            // Clear headers after sending response
+            hyperware_app_common::clear_response_headers();
         };
 
         let handler_body = if handler.is_async {

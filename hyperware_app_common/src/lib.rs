@@ -191,7 +191,12 @@ pub async fn sleep(sleep_ms: u64) -> Result<(), AppSendError> {
         .body(timer::TimerAction::SetTimer(sleep_ms))
         .expects_response((sleep_ms / 1_000) + 1);
 
-    let _: Vec<u8> = send(timer_request).await?;
+    let correlation_id = Uuid::new_v4().to_string();
+    if let Err(e) = request.context(correlation_id.as_bytes().to_vec()).send() {
+        return Err(AppSendError::BuildError(e));
+    }
+
+    let _ = ResponseFuture::new(correlation_id).await;
 
     return Ok(());
 }

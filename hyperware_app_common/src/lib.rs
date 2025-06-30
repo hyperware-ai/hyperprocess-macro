@@ -9,7 +9,7 @@ use futures_util::task::noop_waker_ref;
 use hyperware_process_lib::http::server::HttpServer;
 use hyperware_process_lib::logging::info;
 use hyperware_process_lib::{
-    get_state, http, kiprintln, set_state, BuildError, LazyLoadBlob, Message, Request, SendError,
+    get_state, http, kiprintln, set_state, timer, BuildError, LazyLoadBlob, Message, Request, SendError,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -38,6 +38,7 @@ thread_local! {
         current_server: None,
         current_message: None,
         current_http_method: None,
+        response_headers: HashMap::new(),
     });
 }
 
@@ -51,6 +52,7 @@ pub struct AppHelpers {
     pub current_server: Option<*mut HttpServer>,
     pub current_message: Option<Message>,
     pub current_http_method: Option<String>,
+    pub response_headers: HashMap<String, String>,
 }
 
 // Access function for the current path
@@ -65,6 +67,27 @@ pub fn get_server() -> Option<&'static mut HttpServer> {
 
 pub fn get_http_method() -> Option<String> {
     APP_HELPERS.with(|ctx| ctx.borrow().current_http_method.clone())
+}
+
+// Set response headers that will be included in the HTTP response
+pub fn set_response_headers(headers: HashMap<String, String>) {
+    APP_HELPERS.with(|ctx| {
+        ctx.borrow_mut().response_headers = headers;
+    })
+}
+
+// Add a single response header
+pub fn add_response_header(key: String, value: String) {
+    APP_HELPERS.with(|ctx| {
+        ctx.borrow_mut().response_headers.insert(key, value);
+    })
+}
+
+// Clear all response headers
+pub fn clear_response_headers() {
+    APP_HELPERS.with(|ctx| {
+        ctx.borrow_mut().response_headers.clear();
+    })
 }
 
 // Access function for the source address of the current message
@@ -163,6 +186,21 @@ pub enum AppSendError {
     BuildError(BuildError),
 }
 
+pub async fn sleep(sleep_ms: u64) -> Result<(), AppSendError> {
+    let request = Request::to(("our", "timer", "distro", "sys"))
+        .body(timer::TimerAction::SetTimer(sleep_ms))
+        .expects_response((sleep_ms / 1_000) + 1);
+
+    let correlation_id = Uuid::new_v4().to_string();
+    if let Err(e) = request.context(correlation_id.as_bytes().to_vec()).send() {
+        return Err(AppSendError::BuildError(e));
+    }
+
+    let _ = ResponseFuture::new(correlation_id).await;
+
+    return Ok(());
+}
+
 pub async fn send<R>(request: Request) -> Result<R, AppSendError>
 where
     R: serde::de::DeserializeOwned,
@@ -235,10 +273,13 @@ pub enum SaveOptions {
     EveryNMessage(u64),
     // Persist State Every N Seconds
     EveryNSeconds(u64),
+    // Persist State Only If Changed
+    OnDiff,
 }
 pub struct HiddenState {
     save_config: SaveOptions,
     message_count: u64,
+    old_state: Option<Vec<u8>>, // Stores the serialized state from before message processing
 }
 
 impl HiddenState {
@@ -246,6 +287,7 @@ impl HiddenState {
         Self {
             save_config,
             message_count: 0,
+            old_state: None,
         }
     }
 
@@ -263,11 +305,31 @@ impl HiddenState {
                 }
             }
             SaveOptions::EveryNSeconds(_) => false, // Handled by timer instead
+            SaveOptions::OnDiff => false, // Will be handled separately with state comparison
         }
     }
 }
 
 // TODO: We need a timer macro again.
+
+/// Store a snapshot of the current state before processing a message
+/// This is used for OnDiff save option to compare state before and after
+/// Only stores if old_state is None (i.e., first time or after a save)
+pub fn store_old_state<S>(state: &S)
+where
+    S: serde::Serialize,
+{
+    APP_CONTEXT.with(|ctx| {
+        let mut ctx_mut = ctx.borrow_mut();
+        if let Some(ref mut hidden_state) = ctx_mut.hidden_state {
+            if matches!(hidden_state.save_config, SaveOptions::OnDiff) && hidden_state.old_state.is_none() {
+                if let Ok(s_bytes) = rmp_serde::to_vec(state) {
+                    hidden_state.old_state = Some(s_bytes);
+                }
+            }
+        }
+    });
+}
 
 /// Trait that must be implemented by application state types
 pub trait State {
@@ -416,10 +478,35 @@ where
     APP_CONTEXT.with(|ctx| {
         let mut ctx_mut = ctx.borrow_mut();
         if let Some(ref mut hidden_state) = ctx_mut.hidden_state {
-            if hidden_state.should_save_state() {
+            let should_save = if matches!(hidden_state.save_config, SaveOptions::OnDiff) {
+                // For OnDiff, compare current state with old state
+                if let Ok(current_bytes) = rmp_serde::to_vec(state) {
+                    let state_changed = match &hidden_state.old_state {
+                        Some(old_bytes) => old_bytes != &current_bytes,
+                        None => true, // If no old state, consider it changed
+                    };
+
+                    if state_changed {
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                hidden_state.should_save_state()
+            };
+
+            if should_save {
                 if let Ok(s_bytes) = rmp_serde::to_vec(state) {
                     kiprintln!("State persisted");
                     let _ = set_state(&s_bytes);
+
+                    // Clear old_state after saving so it can be set again on next message
+                    if matches!(hidden_state.save_config, SaveOptions::OnDiff) {
+                        hidden_state.old_state = None;
+                    }
                 }
             }
         }

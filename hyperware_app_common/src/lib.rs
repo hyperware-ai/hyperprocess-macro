@@ -9,7 +9,7 @@ use futures_util::task::noop_waker_ref;
 use hyperware_process_lib::http::server::HttpServer;
 use hyperware_process_lib::logging::info;
 use hyperware_process_lib::{
-    get_state, http, kiprintln, set_state, BuildError, LazyLoadBlob, Message, Request, SendError,
+    get_state, http, kiprintln, set_state, timer, BuildError, LazyLoadBlob, Message, Request, SendError,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -184,6 +184,21 @@ pub enum AppSendError {
     SendError(SendError),
     #[error("BuildError: {0}")]
     BuildError(BuildError),
+}
+
+pub async fn sleep(sleep_ms: u64) -> Result<(), AppSendError> {
+    let request = Request::to(("our", "timer", "distro", "sys"))
+        .body(timer::TimerAction::SetTimer(sleep_ms))
+        .expects_response((sleep_ms / 1_000) + 1);
+
+    let correlation_id = Uuid::new_v4().to_string();
+    if let Err(e) = request.context(correlation_id.as_bytes().to_vec()).send() {
+        return Err(AppSendError::BuildError(e));
+    }
+
+    let _ = ResponseFuture::new(correlation_id).await;
+
+    return Ok(());
 }
 
 pub async fn send<R>(request: Request) -> Result<R, AppSendError>

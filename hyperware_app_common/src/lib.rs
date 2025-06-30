@@ -32,7 +32,6 @@ thread_local! {
 
     pub static RESPONSE_REGISTRY: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
 
-
     pub static APP_HELPERS: RefCell<AppHelpers> = RefCell::new(AppHelpers {
         current_path: None,
         current_server: None,
@@ -500,7 +499,6 @@ where
 
             if should_save {
                 if let Ok(s_bytes) = rmp_serde::to_vec(state) {
-                    kiprintln!("State persisted");
                     let _ = set_state(&s_bytes);
 
                     // Clear old_state after saving so it can be set again on next message

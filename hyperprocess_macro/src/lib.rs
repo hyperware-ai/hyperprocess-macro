@@ -5,6 +5,7 @@ use syn::{
     parse_macro_input, punctuated::Punctuated, spanned::Spanned, token::Comma, Expr, ItemImpl,
     Meta, ReturnType,
 };
+use uuid;
 
 //------------------------------------------------------------------------------
 // Type Definitions
@@ -913,14 +914,19 @@ fn generate_response_handling(
                 // Instead of wrapping in HPMResponse enum, directly serialize the result
                 let response_bytes = serde_json::to_vec(&result).unwrap();
 
-                // Get headers from APP_HELPERS if any are set
-                let headers_opt = hyperware_app_common::APP_HELPERS.with(|ctx| {
-                    let helpers = ctx.borrow();
-                    if helpers.response_headers.is_empty() {
-                        None
-                    } else {
-                        Some(helpers.response_headers.clone())
-                    }
+                // Get headers from the new request context
+                let headers_opt = hyperware_app_common::APP_HELPERS.with(|helper_ctx| {
+                    helper_ctx.borrow().current_http_request_id.as_ref().and_then(|id| {
+                        hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
+                            contexts.borrow().get(id).and_then(|req_ctx| {
+                                if req_ctx.response_headers.is_empty() {
+                                    None
+                                } else {
+                                    Some(req_ctx.response_headers.clone())
+                                }
+                            })
+                        })
+                    })
                 });
 
                 hyperware_process_lib::http::server::send_response(
@@ -928,9 +934,9 @@ fn generate_response_handling(
                     headers_opt,
                     response_bytes
                 );
-
-                // Clear headers after sending response
-                hyperware_app_common::clear_response_headers();
+                
+                // Clear HTTP context immediately after sending the response
+                hyperware_app_common::clear_http_request_context();
             }
         }
     }
@@ -944,13 +950,19 @@ fn generate_async_handler_arm(
     variant_name: &syn::Ident,
     response_handling: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    let hyper_macro = if func.is_http {
+        quote! { hyperware_app_common::hyper_http }
+    } else {
+        quote! { hyperware_app_common::hyper }
+    };
+
     if func.params.is_empty() {
         // Updated pattern to match struct variant with no fields
         quote! {
             HPMRequest::#variant_name{} => {
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper! {
+                #hyper_macro! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
@@ -964,7 +976,7 @@ fn generate_async_handler_arm(
                 let param_captured = param;  // Capture param before moving into async block
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper! {
+                #hyper_macro! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(param_captured).await };
                     #response_handling
@@ -988,7 +1000,7 @@ fn generate_async_handler_arm(
                 #(#capture_statements)*
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper! {
+                #hyper_macro! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(#(#captured_names),*).await };
                     #response_handling
@@ -1210,27 +1222,29 @@ fn generate_message_handlers(
                         },
                         Err(e) => {
                             let error_details = if blob.bytes.is_empty() {
-                                "Request body is empty. This handler expects a JSON object with the handler name and parameters.".to_string()
+                                "Request body is empty but was expected to contain handler parameters.".to_string()
                             } else if let Ok(json_value) = serde_json::from_slice::<serde_json::Value>(&blob.bytes) {
                                 format!(
-                                    "Invalid request format. Expected: {{\"{}\":[ ...parameters... ]}}, but got: {}",
-                                    stringify!(#variant_name),
+                                    "Invalid request format. Expected one of the parameterized handler formats, but got: {}",
                                     serde_json::to_string(&json_value).unwrap_or_else(|_| "invalid JSON".to_string())
                                 )
                             } else {
                                 format!(
-                                    "Invalid JSON in request body. Expected: {{\"{}\":[ ...parameters... ]}}. Parse error: {}",
-                                    stringify!(#variant_name),
+                                    "Invalid JSON in request body. Parse error: {}",
                                     e
                                 )
                             };
 
-                            hyperware_process_lib::logging::error!("Handler {} failed to deserialize request: {}", stringify!(#fn_name), error_details);
+                            hyperware_process_lib::logging::error!("Failed to parse request body for {} {}: {}", http_method, current_path, error_details);
+
+                            // Send appropriate error response instead of falling through
                             hyperware_process_lib::http::server::send_response(
                                 hyperware_process_lib::http::StatusCode::BAD_REQUEST,
                                 None,
                                 error_details.into_bytes()
                             );
+                            hyperware_app_common::clear_http_request_context();
+                            return;
                         }
                     }
                 } else {
@@ -1271,13 +1285,20 @@ fn generate_message_handlers(
                 }
             };
 
-            // Get headers from APP_HELPERS if any are set
-            let headers_opt = hyperware_app_common::APP_HELPERS.with(|ctx| {
-                let helpers = ctx.borrow();
-                if helpers.response_headers.is_empty() {
-                    None
+            // Get headers from HTTP_REQUEST_CONTEXTS if any are set
+            let headers_opt = hyperware_app_common::APP_HELPERS.with(|helper_ctx| {
+                if let Some(id) = &helper_ctx.borrow().current_http_request_id {
+                    hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
+                        contexts.borrow().get(id).and_then(|req_ctx| {
+                            if req_ctx.response_headers.is_empty() {
+                                None
+                            } else {
+                                Some(req_ctx.response_headers.clone())
+                            }
+                        })
+                    })
                 } else {
-                    Some(helpers.response_headers.clone())
+                    None
                 }
             });
 
@@ -1287,14 +1308,15 @@ fn generate_message_handlers(
                 response_bytes
             );
 
-            // Clear headers after sending response
+            // Clear headers and HTTP context after sending response
             hyperware_app_common::clear_response_headers();
+            hyperware_app_common::clear_http_request_context();
         };
 
         let handler_body = if handler.is_async {
             quote! {
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper! {
+                hyperware_app_common::hyper_http! {
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
                 }
@@ -1338,42 +1360,48 @@ fn generate_message_handlers(
                                 hyperware_process_lib::logging::debug!("Blob size: {} bytes, content: {}", blob.bytes.len(), String::from_utf8_lossy(&blob.bytes[..std::cmp::min(200, blob.bytes.len())]));
                             }
 
+                            // Create a unique ID for this request and set up its context
+                            let request_id = uuid::Uuid::new_v4().to_string();
+                            hyperware_process_lib::logging::debug!("Setting up HTTP context with id: {}", request_id);
+                            hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
+                                contexts.borrow_mut().insert(request_id.clone(), hyperware_app_common::HttpRequestContext {
+                                    request: http_request,
+                                    response_headers: std::collections::HashMap::new(),
+                                });
+                            });
+                            hyperware_app_common::APP_HELPERS.with(|helpers| {
+                                helpers.borrow_mut().current_http_request_id = Some(request_id.clone());
+                            });
+                            hyperware_process_lib::logging::debug!("HTTP context established, id: {}", request_id);
+
                             // Get the HTTP method and path, handling potential errors
-                            let http_method = http_request.method()
-                                .map(|m| m.to_string())
+                            let http_method = hyperware_app_common::get_http_method()
                                 .unwrap_or_else(|e| {
-                                    hyperware_process_lib::logging::warn!("Failed to parse HTTP method: {}", e);
+                                    hyperware_process_lib::logging::warn!("Failed to get HTTP method from request context: {}", e);
                                     "UNKNOWN".to_string()
                                 });
 
-                            let current_path = match http_request.path() {
+                            let current_path = match hyperware_app_common::get_path() {
                                 Ok(path) => {
                                     hyperware_process_lib::logging::debug!("Successfully parsed HTTP path: '{}'", path);
                                     path
                                 },
                                 Err(e) => {
-                                    hyperware_process_lib::logging::error!("Failed to parse HTTP path: {}", e);
+                                    hyperware_process_lib::logging::error!("Failed to get HTTP path: {}", e);
                                     hyperware_process_lib::http::server::send_response(
                                         hyperware_process_lib::http::StatusCode::BAD_REQUEST,
                                         None,
                                         format!("Invalid path: {}", e).into_bytes(),
                                     );
+                                    hyperware_app_common::clear_http_request_context();
                                     return;
                                 }
                             };
 
-                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                let mut ctx_mut = ctx.borrow_mut();
-                                ctx_mut.current_path = Some(current_path.clone());
-                                ctx_mut.current_http_method = Some(http_method.clone());
-                                // TODO: Add query params and any other needed fields
-                                //ctx_mut.http_query_params = http_request.query_params.clone();
-                            });
-
                             // Match request to handler based on method and path
                             hyperware_process_lib::logging::debug!("Starting handler matching for {} {}", http_method, current_path);
 
-                                                        // Priority logic: if there's a request body, try parameterized handlers first
+                            // Priority logic: if there's a request body, try parameterized handlers first
                             if blob_opt.is_some() && !blob_opt.as_ref().unwrap().bytes.is_empty() {
                                 hyperware_process_lib::logging::debug!("Request has body, using two-phase matching");
 
@@ -1387,6 +1415,7 @@ fn generate_message_handlers(
                                                 #http_request_match_arms
                                                 hyperware_app_common::maybe_save_state(&mut *state);
                                             }
+                                            // NOTE: Context cleanup happens after response is sent in the response handling code
                                             return;
                                         },
                                         Err(e) => {
@@ -1412,6 +1441,7 @@ fn generate_message_handlers(
                                                 None,
                                                 error_details.into_bytes()
                                             );
+                                            hyperware_app_common::clear_http_request_context();
                                             return;
                                         }
                                     }
@@ -1429,6 +1459,7 @@ fn generate_message_handlers(
                                 None,
                                 format!("No handler found for {} {}", http_method, current_path).into_bytes(),
                             );
+                            hyperware_app_common::clear_http_request_context();
                         },
                         hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
                             hyperware_process_lib::logging::debug!("Received WebSocket message on channel {}, type: {:?}", channel_id, message_type);

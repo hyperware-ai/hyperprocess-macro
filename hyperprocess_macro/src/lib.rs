@@ -950,19 +950,13 @@ fn generate_async_handler_arm(
     variant_name: &syn::Ident,
     response_handling: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let hyper_macro = if func.is_http {
-        quote! { hyperware_app_common::hyper_http }
-    } else {
-        quote! { hyperware_app_common::hyper }
-    };
-
     if func.params.is_empty() {
         // Updated pattern to match struct variant with no fields
         quote! {
             HPMRequest::#variant_name{} => {
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                #hyper_macro! {
+                hyperware_app_common::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
@@ -976,7 +970,7 @@ fn generate_async_handler_arm(
                 let param_captured = param;  // Capture param before moving into async block
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                #hyper_macro! {
+                hyperware_app_common::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(param_captured).await };
                     #response_handling
@@ -1000,7 +994,7 @@ fn generate_async_handler_arm(
                 #(#capture_statements)*
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                #hyper_macro! {
+                hyperware_app_common::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(#(#captured_names),*).await };
                     #response_handling
@@ -1322,7 +1316,7 @@ fn generate_parameterless_handler_dispatch(
         let handler_body = if handler.is_async {
             quote! {
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper_http! {
+                hyperware_app_common::hyper! {
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
                 }

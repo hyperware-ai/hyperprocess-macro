@@ -203,12 +203,7 @@ pub fn get_query_params() -> Option<HashMap<String, String>> {
 }
 
 pub struct Executor {
-    tasks: Vec<Task>,
-}
-
-struct Task {
-    future: Pin<Box<dyn Future<Output = ()>>>,
-    http_request_id: Option<String>,
+    tasks: Vec<Pin<Box<dyn Future<Output = ()>>>>,
 }
 
 impl Executor {
@@ -217,19 +212,7 @@ impl Executor {
     }
 
     pub fn spawn(&mut self, fut: impl Future<Output = ()> + 'static) {
-        self.tasks.push(Task {
-            future: Box::pin(fut),
-            http_request_id: None,
-        });
-    }
-
-    pub fn spawn_with_http_context(&mut self, fut: impl Future<Output = ()> + 'static) {
-        let http_request_id =
-            APP_HELPERS.with(|helpers| helpers.borrow().current_http_request_id.clone());
-        self.tasks.push(Task {
-            future: Box::pin(fut),
-            http_request_id,
-        });
+        self.tasks.push(Box::pin(fut));
     }
 
     pub fn poll_all_tasks(&mut self) {
@@ -237,22 +220,9 @@ impl Executor {
         let mut completed = Vec::new();
 
         for i in 0..self.tasks.len() {
-            let task_id = self.tasks[i].http_request_id.clone();
-
-            let original_id = APP_HELPERS.with(|helpers| {
-                let mut helpers = helpers.borrow_mut();
-                let original_id = helpers.current_http_request_id.clone();
-                helpers.current_http_request_id = task_id;
-                original_id
-            });
-
-            if let Poll::Ready(()) = self.tasks[i].future.as_mut().poll(&mut ctx) {
+            if let Poll::Ready(()) = self.tasks[i].as_mut().poll(&mut ctx) {
                 completed.push(i);
             }
-
-            APP_HELPERS.with(|helpers| {
-                helpers.borrow_mut().current_http_request_id = original_id;
-            });
         }
 
         for idx in completed.into_iter().rev() {
@@ -260,13 +230,42 @@ impl Executor {
         }
     }
 }
+#[derive(Clone)]
+struct HttpContextSnapshot {
+    request_id: Option<String>,
+    request_context: Option<HttpRequestContext>,
+}
+
 struct ResponseFuture {
     correlation_id: String,
+    // Capture HTTP context at creation time
+    http_context_snapshot: Option<HttpContextSnapshot>,
 }
 
 impl ResponseFuture {
     fn new(correlation_id: String) -> Self {
-        Self { correlation_id }
+        // Capture current HTTP context when future is created (at .await point)
+        let http_context_snapshot = APP_HELPERS.with(|helpers| {
+            let helpers = helpers.borrow();
+
+            // Only capture if we're in an HTTP context
+            if let Some(request_id) = helpers.current_http_request_id.as_ref() {
+                HTTP_REQUEST_CONTEXTS.with(|contexts| {
+                    let contexts = contexts.borrow();
+                    contexts.get(request_id).map(|ctx| HttpContextSnapshot {
+                        request_id: Some(request_id.clone()),
+                        request_context: Some(ctx.clone()),
+                    })
+                })
+            } else {
+                None
+            }
+        });
+
+        Self {
+            correlation_id,
+            http_context_snapshot,
+        }
     }
 }
 
@@ -274,6 +273,21 @@ impl Future for ResponseFuture {
     type Output = Vec<u8>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Restore this future's captured context
+        if let Some(ref snapshot) = self.http_context_snapshot {
+            if let (Some(ref request_id), Some(ref request_context)) = (&snapshot.request_id, &snapshot.request_context) {
+                // Set the request ID in helpers
+                APP_HELPERS.with(|helpers| {
+                    helpers.borrow_mut().current_http_request_id = Some(request_id.clone());
+                });
+
+                // Restore the full context in HTTP_REQUEST_CONTEXTS
+                HTTP_REQUEST_CONTEXTS.with(|contexts| {
+                    contexts.borrow_mut().insert(request_id.clone(), request_context.clone());
+                });
+            }
+        }
+
         let correlation_id = &self.correlation_id;
 
         let maybe_bytes = RESPONSE_REGISTRY.with(|registry| {
@@ -373,16 +387,6 @@ macro_rules! hyper {
     };
 }
 
-#[macro_export]
-macro_rules! hyper_http {
-    ($($code:tt)*) => {
-        $crate::APP_CONTEXT.with(|ctx| {
-            ctx.borrow_mut().executor.spawn_with_http_context(async move {
-                $($code)*
-            })
-        })
-    };
-}
 
 // Enum defining the state persistance behaviour
 #[derive(Clone)]

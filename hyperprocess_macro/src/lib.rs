@@ -5,7 +5,6 @@ use syn::{
     parse_macro_input, punctuated::Punctuated, spanned::Spanned, token::Comma, Expr, ItemImpl,
     Meta, ReturnType,
 };
-use uuid;
 
 //------------------------------------------------------------------------------
 // Type Definitions
@@ -914,18 +913,14 @@ fn generate_response_handling(
                 // Instead of wrapping in HPMResponse enum, directly serialize the result
                 let response_bytes = serde_json::to_vec(&result).unwrap();
 
-                // Get headers from the new request context
-                let headers_opt = hyperware_app_common::APP_HELPERS.with(|helper_ctx| {
-                    helper_ctx.borrow().current_http_request_id.as_ref().and_then(|id| {
-                        hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                            contexts.borrow().get(id).and_then(|req_ctx| {
-                                if req_ctx.response_headers.is_empty() {
-                                    None
-                                } else {
-                                    Some(req_ctx.response_headers.clone())
-                                }
-                            })
-                        })
+                // Get headers from the current HTTP context
+                let headers_opt = hyperware_app_common::APP_HELPERS.with(|helpers| {
+                    helpers.borrow().current_http_context.as_ref().and_then(|ctx| {
+                        if ctx.response_headers.is_empty() {
+                            None
+                        } else {
+                            Some(ctx.response_headers.clone())
+                        }
                     })
                 });
 
@@ -1097,18 +1092,14 @@ fn ws_method_opt_to_call(ws_method: &Option<syn::Ident>) -> proc_macro2::TokenSt
 /// Generate HTTP context setup code
 fn generate_http_context_setup() -> proc_macro2::TokenStream {
     quote! {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        hyperware_process_lib::logging::debug!("Setting up HTTP context with id: {}", request_id);
-        hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
-            contexts.borrow_mut().insert(request_id.clone(), hyperware_app_common::HttpRequestContext {
+        hyperware_process_lib::logging::debug!("Setting up HTTP context");
+        hyperware_app_common::APP_HELPERS.with(|helpers| {
+            helpers.borrow_mut().current_http_context = Some(hyperware_app_common::HttpRequestContext {
                 request: http_request,
                 response_headers: std::collections::HashMap::new(),
             });
         });
-        hyperware_app_common::APP_HELPERS.with(|helpers| {
-            helpers.borrow_mut().current_http_request_id = Some(request_id.clone());
-        });
-        hyperware_process_lib::logging::debug!("HTTP context established, id: {}", request_id);
+        hyperware_process_lib::logging::debug!("HTTP context established");
     }
 }
 
@@ -1287,20 +1278,14 @@ fn generate_parameterless_handler_dispatch(
                 }
             };
 
-            let headers_opt = hyperware_app_common::APP_HELPERS.with(|helper_ctx| {
-                if let Some(id) = &helper_ctx.borrow().current_http_request_id {
-                    hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                        contexts.borrow().get(id).and_then(|req_ctx| {
-                            if req_ctx.response_headers.is_empty() {
-                                None
-                            } else {
-                                Some(req_ctx.response_headers.clone())
-                            }
-                        })
-                    })
-                } else {
-                    None
-                }
+            let headers_opt = hyperware_app_common::APP_HELPERS.with(|helpers| {
+                helpers.borrow().current_http_context.as_ref().and_then(|ctx| {
+                    if ctx.response_headers.is_empty() {
+                        None
+                    } else {
+                        Some(ctx.response_headers.clone())
+                    }
+                })
             });
 
             hyperware_process_lib::http::server::send_response(

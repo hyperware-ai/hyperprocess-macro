@@ -31,12 +31,10 @@ thread_local! {
 
     pub static RESPONSE_REGISTRY: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
 
-    pub static HTTP_REQUEST_CONTEXTS: RefCell<HashMap<String, HttpRequestContext>> = RefCell::new(HashMap::new());
-
     pub static APP_HELPERS: RefCell<AppHelpers> = RefCell::new(AppHelpers {
         current_server: None,
         current_message: None,
-        current_http_request_id: None,
+        current_http_context: None,
     });
 }
 
@@ -54,34 +52,15 @@ pub struct AppContext {
 pub struct AppHelpers {
     pub current_server: Option<*mut HttpServer>,
     pub current_message: Option<Message>,
-    pub current_http_request_id: Option<String>,
+    pub current_http_context: Option<HttpRequestContext>,
 }
 
 // Access function for the current path
 pub fn get_path() -> Result<String, String> {
-    APP_HELPERS.with(|ctx| {
-        let helpers = ctx.borrow();
-        match helpers.current_http_request_id.as_ref() {
-            Some(id) => {
-                HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                    let contexts = contexts.borrow();
-                    match contexts.get(id) {
-                        Some(req_ctx) => {
-                            let path_result = req_ctx.request.path()
-                                .map_err(|e| e.to_string());
-                            path_result
-                        },
-                        None => {
-                            hyperware_process_lib::logging::debug!("No HTTP context found for id: {}", id);
-                            Err("No HTTP context available".to_string())
-                        },
-                    }
-                })
-            },
-            None => {
-                hyperware_process_lib::logging::debug!("No current_http_request_id set");
-                Err("No HTTP context available".to_string())
-            },
+    APP_HELPERS.with(|helpers| {
+        match &helpers.borrow().current_http_context {
+            Some(ctx) => ctx.request.path().map_err(|e| e.to_string()),
+            None => Err("No HTTP context available".to_string()),
         }
     })
 }
@@ -92,83 +71,46 @@ pub fn get_server() -> Option<&'static mut HttpServer> {
 }
 
 pub fn get_http_method() -> Result<String, String> {
-    APP_HELPERS.with(|ctx| {
-        let helpers = ctx.borrow();
-        hyperware_process_lib::logging::debug!("get_http_method called, current_http_request_id: {:?}", helpers.current_http_request_id);
-        match helpers.current_http_request_id.as_ref() {
-            Some(id) => {
-                HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                    let contexts = contexts.borrow();
-                    hyperware_process_lib::logging::debug!("Looking for method context with id: {}", id);
-                    match contexts.get(id) {
-                        Some(req_ctx) => {
-                            let method_result = req_ctx.request.method()
-                                .map(|m| m.to_string())
-                                .map_err(|e| e.to_string());
-                            hyperware_process_lib::logging::debug!("get_http_method result: {:?}", method_result);
-                            method_result
-                        },
-                        None => {
-                            hyperware_process_lib::logging::debug!("No HTTP context found for method id: {}", id);
-                            Err("No HTTP context available".to_string())
-                        },
-                    }
-                })
-            },
-            None => {
-                hyperware_process_lib::logging::debug!("No current_http_request_id set for method");
-                Err("No HTTP context available".to_string())
-            },
+    APP_HELPERS.with(|helpers| {
+        match &helpers.borrow().current_http_context {
+            Some(ctx) => ctx.request.method()
+                .map(|m| m.to_string())
+                .map_err(|e| e.to_string()),
+            None => Err("No HTTP context available".to_string()),
         }
     })
 }
 
 // Set response headers that will be included in the HTTP response
 pub fn set_response_headers(headers: HashMap<String, String>) {
-    APP_HELPERS.with(|helper_ctx| {
-        if let Some(id) = &helper_ctx.borrow().current_http_request_id {
-            HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                if let Some(req_ctx) = contexts.borrow_mut().get_mut(id) {
-                    req_ctx.response_headers = headers;
-                }
-            })
+    APP_HELPERS.with(|helpers| {
+        if let Some(ctx) = &mut helpers.borrow_mut().current_http_context {
+            ctx.response_headers = headers;
         }
     })
 }
 
 // Add a single response header
 pub fn add_response_header(key: String, value: String) {
-    APP_HELPERS.with(|helper_ctx| {
-        if let Some(id) = &helper_ctx.borrow().current_http_request_id {
-            HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                if let Some(req_ctx) = contexts.borrow_mut().get_mut(id) {
-                    req_ctx.response_headers.insert(key, value);
-                }
-            })
+    APP_HELPERS.with(|helpers| {
+        if let Some(ctx) = &mut helpers.borrow_mut().current_http_context {
+            ctx.response_headers.insert(key, value);
         }
     })
 }
 
 // Clear all response headers
 pub fn clear_response_headers() {
-    APP_HELPERS.with(|helper_ctx| {
-        if let Some(id) = &helper_ctx.borrow().current_http_request_id {
-            HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                if let Some(req_ctx) = contexts.borrow_mut().get_mut(id) {
-                    req_ctx.response_headers.clear();
-                }
-            })
+    APP_HELPERS.with(|helpers| {
+        if let Some(ctx) = &mut helpers.borrow_mut().current_http_context {
+            ctx.response_headers.clear();
         }
     })
 }
 
 pub fn clear_http_request_context() {
-    APP_HELPERS.with(|helper_ctx| {
-        if let Some(id) = helper_ctx.borrow_mut().current_http_request_id.take() {
-            HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                contexts.borrow_mut().remove(&id);
-            })
-        }
+    APP_HELPERS.with(|helpers| {
+        helpers.borrow_mut().current_http_context = None;
     })
 }
 
@@ -233,8 +175,7 @@ impl Executor {
 }
 #[derive(Clone)]
 struct HttpContextSnapshot {
-    request_id: Option<String>,
-    request_context: Option<HttpRequestContext>,
+    context: HttpRequestContext,
 }
 
 struct ResponseFuture {
@@ -247,20 +188,12 @@ impl ResponseFuture {
     fn new(correlation_id: String) -> Self {
         // Capture current HTTP context when future is created (at .await point)
         let http_context_snapshot = APP_HELPERS.with(|helpers| {
-            let helpers = helpers.borrow();
-
-            // Only capture if we're in an HTTP context
-            if let Some(request_id) = helpers.current_http_request_id.as_ref() {
-                HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                    let contexts = contexts.borrow();
-                    contexts.get(request_id).map(|ctx| HttpContextSnapshot {
-                        request_id: Some(request_id.clone()),
-                        request_context: Some(ctx.clone()),
-                    })
+            helpers.borrow()
+                .current_http_context
+                .as_ref()
+                .map(|ctx| HttpContextSnapshot {
+                    context: ctx.clone(),
                 })
-            } else {
-                None
-            }
         });
 
         Self {
@@ -276,17 +209,9 @@ impl Future for ResponseFuture {
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Restore this future's captured context
         if let Some(ref snapshot) = self.http_context_snapshot {
-            if let (Some(ref request_id), Some(ref request_context)) = (&snapshot.request_id, &snapshot.request_context) {
-                // Set the request ID in helpers
-                APP_HELPERS.with(|helpers| {
-                    helpers.borrow_mut().current_http_request_id = Some(request_id.clone());
-                });
-
-                // Restore the full context in HTTP_REQUEST_CONTEXTS
-                HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                    contexts.borrow_mut().insert(request_id.clone(), request_context.clone());
-                });
-            }
+            APP_HELPERS.with(|helpers| {
+                helpers.borrow_mut().current_http_context = Some(snapshot.context.clone());
+            });
         }
 
         let correlation_id = &self.correlation_id;

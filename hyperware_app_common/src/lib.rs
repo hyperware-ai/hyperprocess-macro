@@ -40,6 +40,7 @@ thread_local! {
     });
 }
 
+#[derive(Clone)]
 pub struct HttpRequestContext {
     pub request: IncomingHttpRequest,
     pub response_headers: HashMap<String, String>,

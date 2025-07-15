@@ -207,13 +207,6 @@ impl Future for ResponseFuture {
     type Output = Vec<u8>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Restore this future's captured context
-        if let Some(ref snapshot) = self.http_context_snapshot {
-            APP_HELPERS.with(|helpers| {
-                helpers.borrow_mut().current_http_context = Some(snapshot.context.clone());
-            });
-        }
-
         let correlation_id = &self.correlation_id;
 
         let maybe_bytes = RESPONSE_REGISTRY.with(|registry| {
@@ -222,6 +215,13 @@ impl Future for ResponseFuture {
         });
 
         if let Some(bytes) = maybe_bytes {
+            // Restore this future's captured context
+            if let Some(ref snapshot) = self.http_context_snapshot {
+                APP_HELPERS.with(|helpers| {
+                    helpers.borrow_mut().current_http_context = Some(snapshot.context.clone());
+                });
+            }
+
             Poll::Ready(bytes)
         } else {
             Poll::Pending

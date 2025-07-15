@@ -99,14 +99,6 @@ pub fn add_response_header(key: String, value: String) {
     })
 }
 
-// Clear all response headers
-pub fn clear_response_headers() {
-    APP_HELPERS.with(|helpers| {
-        if let Some(ctx) = &mut helpers.borrow_mut().current_http_context {
-            ctx.response_headers.clear();
-        }
-    })
-}
 
 pub fn clear_http_request_context() {
     APP_HELPERS.with(|helpers| {
@@ -173,32 +165,22 @@ impl Executor {
         }
     }
 }
-#[derive(Clone)]
-struct HttpContextSnapshot {
-    context: HttpRequestContext,
-}
-
 struct ResponseFuture {
     correlation_id: String,
     // Capture HTTP context at creation time
-    http_context_snapshot: Option<HttpContextSnapshot>,
+    http_context: Option<HttpRequestContext>,
 }
 
 impl ResponseFuture {
     fn new(correlation_id: String) -> Self {
         // Capture current HTTP context when future is created (at .await point)
-        let http_context_snapshot = APP_HELPERS.with(|helpers| {
-            helpers.borrow()
-                .current_http_context
-                .as_ref()
-                .map(|ctx| HttpContextSnapshot {
-                    context: ctx.clone(),
-                })
+        let http_context = APP_HELPERS.with(|helpers| {
+            helpers.borrow().current_http_context.clone()
         });
 
         Self {
             correlation_id,
-            http_context_snapshot,
+            http_context,
         }
     }
 }
@@ -216,9 +198,9 @@ impl Future for ResponseFuture {
 
         if let Some(bytes) = maybe_bytes {
             // Restore this future's captured context
-            if let Some(ref snapshot) = self.http_context_snapshot {
+            if let Some(ref context) = self.http_context {
                 APP_HELPERS.with(|helpers| {
-                    helpers.borrow_mut().current_http_context = Some(snapshot.context.clone());
+                    helpers.borrow_mut().current_http_context = Some(context.clone());
                 });
             }
 

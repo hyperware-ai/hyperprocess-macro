@@ -1092,7 +1092,6 @@ fn ws_method_opt_to_call(ws_method: &Option<syn::Ident>) -> proc_macro2::TokenSt
 /// Generate HTTP context setup code
 fn generate_http_context_setup() -> proc_macro2::TokenStream {
     quote! {
-        hyperware_process_lib::logging::debug!("Setting up HTTP context");
         hyperware_app_common::APP_HELPERS.with(|helpers| {
             helpers.borrow_mut().current_http_context = Some(hyperware_app_common::HttpRequestContext {
                 request: http_request,
@@ -1294,7 +1293,6 @@ fn generate_parameterless_handler_dispatch(
                 response_bytes
             );
 
-            hyperware_app_common::clear_response_headers();
             hyperware_app_common::clear_http_request_context();
         };
 

@@ -5,7 +5,6 @@ use syn::{
     parse_macro_input, punctuated::Punctuated, spanned::Spanned, token::Comma, Expr, ItemImpl,
     Meta, ReturnType,
 };
-use uuid;
 
 //------------------------------------------------------------------------------
 // Type Definitions
@@ -914,18 +913,14 @@ fn generate_response_handling(
                 // Instead of wrapping in HPMResponse enum, directly serialize the result
                 let response_bytes = serde_json::to_vec(&result).unwrap();
 
-                // Get headers from the new request context
-                let headers_opt = hyperware_app_common::APP_HELPERS.with(|helper_ctx| {
-                    helper_ctx.borrow().current_http_request_id.as_ref().and_then(|id| {
-                        hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                            contexts.borrow().get(id).and_then(|req_ctx| {
-                                if req_ctx.response_headers.is_empty() {
-                                    None
-                                } else {
-                                    Some(req_ctx.response_headers.clone())
-                                }
-                            })
-                        })
+                // Get headers from the current HTTP context
+                let headers_opt = hyperware_app_common::APP_HELPERS.with(|helpers| {
+                    helpers.borrow().current_http_context.as_ref().and_then(|ctx| {
+                        if ctx.response_headers.is_empty() {
+                            None
+                        } else {
+                            Some(ctx.response_headers.clone())
+                        }
                     })
                 });
 
@@ -950,19 +945,13 @@ fn generate_async_handler_arm(
     variant_name: &syn::Ident,
     response_handling: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let hyper_macro = if func.is_http {
-        quote! { hyperware_app_common::hyper_http }
-    } else {
-        quote! { hyperware_app_common::hyper }
-    };
-
     if func.params.is_empty() {
         // Updated pattern to match struct variant with no fields
         quote! {
             HPMRequest::#variant_name{} => {
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                #hyper_macro! {
+                hyperware_app_common::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
@@ -976,7 +965,7 @@ fn generate_async_handler_arm(
                 let param_captured = param;  // Capture param before moving into async block
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                #hyper_macro! {
+                hyperware_app_common::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(param_captured).await };
                     #response_handling
@@ -1000,7 +989,7 @@ fn generate_async_handler_arm(
                 #(#capture_statements)*
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                #hyper_macro! {
+                hyperware_app_common::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(#(#captured_names),*).await };
                     #response_handling
@@ -1103,18 +1092,13 @@ fn ws_method_opt_to_call(ws_method: &Option<syn::Ident>) -> proc_macro2::TokenSt
 /// Generate HTTP context setup code
 fn generate_http_context_setup() -> proc_macro2::TokenStream {
     quote! {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        hyperware_process_lib::logging::debug!("Setting up HTTP context with id: {}", request_id);
-        hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
-            contexts.borrow_mut().insert(request_id.clone(), hyperware_app_common::HttpRequestContext {
+        hyperware_app_common::APP_HELPERS.with(|helpers| {
+            helpers.borrow_mut().current_http_context = Some(hyperware_app_common::HttpRequestContext {
                 request: http_request,
                 response_headers: std::collections::HashMap::new(),
             });
         });
-        hyperware_app_common::APP_HELPERS.with(|helpers| {
-            helpers.borrow_mut().current_http_request_id = Some(request_id.clone());
-        });
-        hyperware_process_lib::logging::debug!("HTTP context established, id: {}", request_id);
+        hyperware_process_lib::logging::debug!("HTTP context established");
     }
 }
 
@@ -1293,20 +1277,14 @@ fn generate_parameterless_handler_dispatch(
                 }
             };
 
-            let headers_opt = hyperware_app_common::APP_HELPERS.with(|helper_ctx| {
-                if let Some(id) = &helper_ctx.borrow().current_http_request_id {
-                    hyperware_app_common::HTTP_REQUEST_CONTEXTS.with(|contexts| {
-                        contexts.borrow().get(id).and_then(|req_ctx| {
-                            if req_ctx.response_headers.is_empty() {
-                                None
-                            } else {
-                                Some(req_ctx.response_headers.clone())
-                            }
-                        })
-                    })
-                } else {
-                    None
-                }
+            let headers_opt = hyperware_app_common::APP_HELPERS.with(|helpers| {
+                helpers.borrow().current_http_context.as_ref().and_then(|ctx| {
+                    if ctx.response_headers.is_empty() {
+                        None
+                    } else {
+                        Some(ctx.response_headers.clone())
+                    }
+                })
             });
 
             hyperware_process_lib::http::server::send_response(
@@ -1315,14 +1293,13 @@ fn generate_parameterless_handler_dispatch(
                 response_bytes
             );
 
-            hyperware_app_common::clear_response_headers();
             hyperware_app_common::clear_http_request_context();
         };
 
         let handler_body = if handler.is_async {
             quote! {
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper_http! {
+                hyperware_app_common::hyper! {
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
                 }

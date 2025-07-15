@@ -1130,22 +1130,22 @@ fn generate_http_error_response(
 fn generate_http_request_parsing() -> proc_macro2::TokenStream {
     quote! {
         let http_method = hyperware_app_common::get_http_method()
-            .unwrap_or_else(|e| {
-                hyperware_process_lib::logging::warn!("Failed to get HTTP method from request context: {}", e);
+            .unwrap_or_else(|| {
+                hyperware_process_lib::logging::warn!("Failed to get HTTP method from request context");
                 "UNKNOWN".to_string()
             });
 
         let current_path = match hyperware_app_common::get_path() {
-            Ok(path) => {
+            Some(path) => {
                 hyperware_process_lib::logging::debug!("Successfully parsed HTTP path: '{}'", path);
                 path
             },
-            Err(e) => {
-                hyperware_process_lib::logging::error!("Failed to get HTTP path: {}", e);
+            None => {
+                hyperware_process_lib::logging::error!("Failed to get HTTP path: no HTTP context available");
                 hyperware_process_lib::http::server::send_response(
                     hyperware_process_lib::http::StatusCode::BAD_REQUEST,
                     None,
-                    format!("Invalid path: {}", e).into_bytes(),
+                    b"Invalid path: no HTTP context available".to_vec(),
                 );
                 hyperware_app_common::clear_http_request_context();
                 return;

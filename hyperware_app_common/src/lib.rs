@@ -56,12 +56,10 @@ pub struct AppHelpers {
 }
 
 // Access function for the current path
-pub fn get_path() -> Result<String, String> {
+pub fn get_path() -> Option<String> {
     APP_HELPERS.with(|helpers| {
-        match &helpers.borrow().current_http_context {
-            Some(ctx) => ctx.request.path().map_err(|e| e.to_string()),
-            None => Err("No HTTP context available".to_string()),
-        }
+        helpers.borrow().current_http_context.as_ref()
+            .and_then(|ctx| ctx.request.path().ok())
     })
 }
 
@@ -70,14 +68,11 @@ pub fn get_server() -> Option<&'static mut HttpServer> {
     APP_HELPERS.with(|ctx| ctx.borrow().current_server.map(|ptr| unsafe { &mut *ptr }))
 }
 
-pub fn get_http_method() -> Result<String, String> {
+pub fn get_http_method() -> Option<String> {
     APP_HELPERS.with(|helpers| {
-        match &helpers.borrow().current_http_context {
-            Some(ctx) => ctx.request.method()
-                .map(|m| m.to_string())
-                .map_err(|e| e.to_string()),
-            None => Err("No HTTP context available".to_string()),
-        }
+        helpers.borrow().current_http_context.as_ref()
+            .and_then(|ctx| ctx.request.method().ok())
+            .map(|m| m.to_string())
     })
 }
 
@@ -121,7 +116,7 @@ pub fn source() -> hyperware_process_lib::Address {
 /// Get query parameters from the current HTTP request path
 /// Returns None if not in an HTTP context or no query parameters present
 pub fn get_query_params() -> Option<HashMap<String, String>> {
-    get_path().ok().map(|path| {
+    get_path().map(|path| {
         let mut params = HashMap::new();
         if let Some(query_start) = path.find('?') {
             let query = &path[query_start + 1..];

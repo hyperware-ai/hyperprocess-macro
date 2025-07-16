@@ -6,11 +6,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures_util::task::noop_waker_ref;
-use hyperware_process_lib::{get_state, http, kiprintln, set_state, BuildError, LazyLoadBlob, Message,  Request, SendError};
-use hyperware_process_lib::logging::info;
-use hyperware_process_lib::http::server::HttpServer;
-use serde::Deserialize;
-use serde::Serialize;
+use hyperware_process_lib::{
+    http::server::{HttpServer, IncomingHttpRequest},
+    logging::info,
+    get_state, http, set_state, timer, BuildError, LazyLoadBlob, Message, Request, SendError,
+};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -31,10 +32,16 @@ thread_local! {
     pub static RESPONSE_REGISTRY: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
 
     pub static APP_HELPERS: RefCell<AppHelpers> = RefCell::new(AppHelpers {
-        current_path: None,
         current_server: None,
         current_message: None,
+        current_http_context: None,
     });
+}
+
+#[derive(Clone)]
+pub struct HttpRequestContext {
+    pub request: IncomingHttpRequest,
+    pub response_headers: HashMap<String, String>,
 }
 
 pub struct AppContext {
@@ -43,19 +50,55 @@ pub struct AppContext {
 }
 
 pub struct AppHelpers {
-    pub current_path: Option<String>,
     pub current_server: Option<*mut HttpServer>,
     pub current_message: Option<Message>,
+    pub current_http_context: Option<HttpRequestContext>,
 }
 
 // Access function for the current path
 pub fn get_path() -> Option<String> {
-    APP_HELPERS.with(|ctx| ctx.borrow().current_path.clone())
+    APP_HELPERS.with(|helpers| {
+        helpers.borrow().current_http_context.as_ref()
+            .and_then(|ctx| ctx.request.path().ok())
+    })
 }
 
 // Access function for the current server
 pub fn get_server() -> Option<&'static mut HttpServer> {
     APP_HELPERS.with(|ctx| ctx.borrow().current_server.map(|ptr| unsafe { &mut *ptr }))
+}
+
+pub fn get_http_method() -> Option<String> {
+    APP_HELPERS.with(|helpers| {
+        helpers.borrow().current_http_context.as_ref()
+            .and_then(|ctx| ctx.request.method().ok())
+            .map(|m| m.to_string())
+    })
+}
+
+// Set response headers that will be included in the HTTP response
+pub fn set_response_headers(headers: HashMap<String, String>) {
+    APP_HELPERS.with(|helpers| {
+        if let Some(ctx) = &mut helpers.borrow_mut().current_http_context {
+            ctx.response_headers = headers;
+        }
+    })
+}
+
+// Add a single response header
+pub fn add_response_header(key: String, value: String) {
+    APP_HELPERS.with(|helpers| {
+        if let Some(ctx) = &mut helpers.borrow_mut().current_http_context {
+            ctx.response_headers.insert(key, value);
+        }
+    })
+}
+
+
+pub fn clear_http_request_context() {
+    APP_HELPERS.with(|helpers| {
+        helpers.borrow_mut().current_http_context = None;
+    })
 }
 
 // Access function for the source address of the current message
@@ -67,6 +110,25 @@ pub fn source() -> hyperware_process_lib::Address {
             .expect("No message in current context")
             .source()
             .clone()
+    })
+}
+
+/// Get query parameters from the current HTTP request path
+/// Returns None if not in an HTTP context or no query parameters present
+pub fn get_query_params() -> Option<HashMap<String, String>> {
+    get_path().map(|path| {
+        let mut params = HashMap::new();
+        if let Some(query_start) = path.find('?') {
+            let query = &path[query_start + 1..];
+            for pair in query.split('&') {
+                if let Some(eq_pos) = pair.find('=') {
+                    let key = pair[..eq_pos].to_string();
+                    let value = pair[eq_pos + 1..].to_string();
+                    params.insert(key, value);
+                }
+            }
+        }
+        params
     })
 }
 
@@ -100,11 +162,21 @@ impl Executor {
 }
 struct ResponseFuture {
     correlation_id: String,
+    // Capture HTTP context at creation time
+    http_context: Option<HttpRequestContext>,
 }
 
 impl ResponseFuture {
     fn new(correlation_id: String) -> Self {
-        Self { correlation_id }
+        // Capture current HTTP context when future is created (at .await point)
+        let http_context = APP_HELPERS.with(|helpers| {
+            helpers.borrow().current_http_context.clone()
+        });
+
+        Self {
+            correlation_id,
+            http_context,
+        }
     }
 }
 
@@ -120,6 +192,13 @@ impl Future for ResponseFuture {
         });
 
         if let Some(bytes) = maybe_bytes {
+            // Restore this future's captured context
+            if let Some(ref context) = self.http_context {
+                APP_HELPERS.with(|helpers| {
+                    helpers.borrow_mut().current_http_context = Some(context.clone());
+                });
+            }
+
             Poll::Ready(bytes)
         } else {
             Poll::Pending
@@ -135,6 +214,21 @@ pub enum AppSendError {
     BuildError(BuildError),
 }
 
+pub async fn sleep(sleep_ms: u64) -> Result<(), AppSendError> {
+    let request = Request::to(("our", "timer", "distro", "sys"))
+        .body(timer::TimerAction::SetTimer(sleep_ms))
+        .expects_response((sleep_ms / 1_000) + 1);
+
+    let correlation_id = Uuid::new_v4().to_string();
+    if let Err(e) = request.context(correlation_id.as_bytes().to_vec()).send() {
+        return Err(AppSendError::BuildError(e));
+    }
+
+    let _ = ResponseFuture::new(correlation_id).await;
+
+    return Ok(());
+}
+
 pub async fn send<R>(request: Request) -> Result<R, AppSendError>
 where
     R: serde::de::DeserializeOwned,
@@ -146,10 +240,7 @@ where
     };
 
     let correlation_id = Uuid::new_v4().to_string();
-    if let Err(e) = request
-        .context(correlation_id.as_bytes().to_vec())
-        .send()
-    {
+    if let Err(e) = request.context(correlation_id.as_bytes().to_vec()).send() {
         return Err(AppSendError::BuildError(e));
     }
 
@@ -174,10 +265,7 @@ where
     };
 
     let correlation_id = Uuid::new_v4().to_string();
-    if let Err(e) = request
-        .context(correlation_id.as_bytes().to_vec())
-        .send()
-    {
+    if let Err(e) = request.context(correlation_id.as_bytes().to_vec()).send() {
         return Err(AppSendError::BuildError(e));
     }
 
@@ -202,6 +290,7 @@ macro_rules! hyper {
     };
 }
 
+
 // Enum defining the state persistance behaviour
 #[derive(Clone)]
 pub enum SaveOptions {
@@ -213,10 +302,13 @@ pub enum SaveOptions {
     EveryNMessage(u64),
     // Persist State Every N Seconds
     EveryNSeconds(u64),
+    // Persist State Only If Changed
+    OnDiff,
 }
 pub struct HiddenState {
     save_config: SaveOptions,
     message_count: u64,
+    old_state: Option<Vec<u8>>, // Stores the serialized state from before message processing
 }
 
 impl HiddenState {
@@ -224,6 +316,7 @@ impl HiddenState {
         Self {
             save_config,
             message_count: 0,
+            old_state: None,
         }
     }
 
@@ -241,11 +334,31 @@ impl HiddenState {
                 }
             }
             SaveOptions::EveryNSeconds(_) => false, // Handled by timer instead
+            SaveOptions::OnDiff => false, // Will be handled separately with state comparison
         }
     }
 }
 
 // TODO: We need a timer macro again.
+
+/// Store a snapshot of the current state before processing a message
+/// This is used for OnDiff save option to compare state before and after
+/// Only stores if old_state is None (i.e., first time or after a save)
+pub fn store_old_state<S>(state: &S)
+where
+    S: serde::Serialize,
+{
+    APP_CONTEXT.with(|ctx| {
+        let mut ctx_mut = ctx.borrow_mut();
+        if let Some(ref mut hidden_state) = ctx_mut.hidden_state {
+            if matches!(hidden_state.save_config, SaveOptions::OnDiff) && hidden_state.old_state.is_none() {
+                if let Ok(s_bytes) = rmp_serde::to_vec(state) {
+                    hidden_state.old_state = Some(s_bytes);
+                }
+            }
+        }
+    });
+}
 
 /// Trait that must be implemented by application state types
 pub trait State {
@@ -331,7 +444,7 @@ pub fn pretty_print_send_error(error: &SendError) {
         .as_ref()
         .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
 
-    kiprintln!(
+    hyperware_process_lib::logging::error!(
         "SendError {{
     kind: {:?},
     target: {},
@@ -367,19 +480,11 @@ pub fn no_http_api_call<S>(_state: &mut S, _req: ()) {
     // does nothing
 }
 
-pub fn no_local_request<S>(
-    _msg: &Message,
-    _state: &mut S,
-    _req: (),
-) {
+pub fn no_local_request<S>(_msg: &Message, _state: &mut S, _req: ()) {
     // does nothing
 }
 
-pub fn no_remote_request<S>(
-    _msg: &Message,
-    _state: &mut S,
-    _req: (),
-) {
+pub fn no_remote_request<S>(_msg: &Message, _state: &mut S, _req: ()) {
     // does nothing
 }
 
@@ -402,9 +507,34 @@ where
     APP_CONTEXT.with(|ctx| {
         let mut ctx_mut = ctx.borrow_mut();
         if let Some(ref mut hidden_state) = ctx_mut.hidden_state {
-            if hidden_state.should_save_state() {
+            let should_save = if matches!(hidden_state.save_config, SaveOptions::OnDiff) {
+                // For OnDiff, compare current state with old state
+                if let Ok(current_bytes) = rmp_serde::to_vec(state) {
+                    let state_changed = match &hidden_state.old_state {
+                        Some(old_bytes) => old_bytes != &current_bytes,
+                        None => true, // If no old state, consider it changed
+                    };
+
+                    if state_changed {
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                hidden_state.should_save_state()
+            };
+
+            if should_save {
                 if let Ok(s_bytes) = rmp_serde::to_vec(state) {
                     let _ = set_state(&s_bytes);
+
+                    // Clear old_state after saving so it can be set again on next message
+                    if matches!(hidden_state.save_config, SaveOptions::OnDiff) {
+                        hidden_state.old_state = None;
+                    }
                 }
             }
         }

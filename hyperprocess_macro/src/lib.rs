@@ -36,6 +36,7 @@ struct HyperProcessArgs {
 }
 
 /// Metadata for a function in the implementation block
+#[derive(Clone)]
 struct FunctionMetadata {
     name: syn::Ident,               // Original function name
     variant_name: String,           // CamelCase variant name
@@ -45,6 +46,8 @@ struct FunctionMetadata {
     is_local: bool,                 // Has #[local] attribute
     is_remote: bool,                // Has #[remote] attribute
     is_http: bool,                  // Has #[http] attribute
+    http_methods: Vec<String>,      // HTTP methods this handler accepts (GET, POST, etc.)
+    http_path: Option<String>,      // Specific path this handler is bound to (optional)
 }
 
 /// Enum for the different handler types
@@ -203,6 +206,121 @@ fn has_attribute(method: &syn::ImplItemFn, attr_name: &str) -> bool {
         .attrs
         .iter()
         .any(|attr| attr.path().is_ident(attr_name))
+}
+
+/// Parse HTTP methods and path from the #[http] attribute
+/// Supports: #[http], #[http(method = "GET")], #[http(method = "POST", path = "/api")]
+fn parse_http_attributes(method: &syn::ImplItemFn) -> (Vec<String>, Option<String>) {
+    for attr in &method.attrs {
+        if attr.path().is_ident("http") {
+            // Handle #[http] with no arguments - defaults to ALL methods
+            if matches!(&attr.meta, syn::Meta::Path(_)) {
+                return (
+                    vec![
+                        "GET".to_string(),
+                        "POST".to_string(),
+                        "PUT".to_string(),
+                        "DELETE".to_string(),
+                        "PATCH".to_string(),
+                        "HEAD".to_string(),
+                        "OPTIONS".to_string(),
+                    ],
+                    None,
+                );
+            }
+
+            // Handle #[http(method = "GET", path = "/api")]
+            if let syn::Meta::List(list) = &attr.meta {
+                let mut methods = None;
+                let mut path = None;
+
+                // Parse the token stream manually
+                let tokens: Vec<_> = list.tokens.clone().into_iter().collect();
+                let mut i = 0;
+
+                while i < tokens.len() {
+                    // Look for identifier (method or path)
+                    if let proc_macro2::TokenTree::Ident(ident) = &tokens[i] {
+                        let ident_str = ident.to_string();
+
+                        // Check for = sign
+                        if i + 2 < tokens.len() {
+                            if let proc_macro2::TokenTree::Punct(punct) = &tokens[i + 1] {
+                                if punct.as_char() == '=' {
+                                    // Get the string literal
+                                    if let proc_macro2::TokenTree::Literal(lit) = &tokens[i + 2] {
+                                        let lit_str = lit.to_string();
+                                        // Remove quotes from the literal
+                                        let value = lit_str.trim_matches('"');
+
+                                        if ident_str == "method" {
+                                            let method = value.to_uppercase();
+                                            if matches!(
+                                                method.as_str(),
+                                                "GET"
+                                                    | "POST"
+                                                    | "PUT"
+                                                    | "DELETE"
+                                                    | "PATCH"
+                                                    | "HEAD"
+                                                    | "OPTIONS"
+                                            ) {
+                                                methods = Some(vec![method]);
+                                            }
+                                        } else if ident_str == "path" {
+                                            path = Some(value.to_string());
+                                        }
+                                    }
+                                    i += 3; // Skip ident, =, and literal
+
+                                    // Skip comma if present
+                                    if i < tokens.len() {
+                                        if let proc_macro2::TokenTree::Punct(punct) = &tokens[i] {
+                                            if punct.as_char() == ',' {
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+
+                // Default to ALL methods if none specified
+                let final_methods = methods.unwrap_or_else(|| {
+                    vec![
+                        "GET".to_string(),
+                        "POST".to_string(),
+                        "PUT".to_string(),
+                        "DELETE".to_string(),
+                        "PATCH".to_string(),
+                        "HEAD".to_string(),
+                        "OPTIONS".to_string(),
+                    ]
+                });
+
+                return (final_methods, path);
+            }
+
+            // Default to ALL methods if parsing fails
+            return (
+                vec![
+                    "GET".to_string(),
+                    "POST".to_string(),
+                    "PUT".to_string(),
+                    "DELETE".to_string(),
+                    "PATCH".to_string(),
+                    "HEAD".to_string(),
+                    "OPTIONS".to_string(),
+                ],
+                None,
+            );
+        }
+    }
+    (Vec::new(), None)
 }
 
 /// Remove our custom attributes from the implementation block
@@ -490,9 +608,12 @@ fn analyze_methods(
             // Handle request-response methods
             if has_http || has_local || has_remote {
                 validate_request_response_function(method)?;
-                function_metadata.push(extract_function_metadata(
-                    method, has_local, has_remote, has_http,
-                ));
+                let metadata = extract_function_metadata(method, has_local, has_remote, has_http);
+
+                // Parameter-less HTTP handlers can optionally specify a path, but it's not required
+                // They can use get_path() and get_method() to handle requests dynamically
+
+                function_metadata.push(metadata);
             }
         }
     }
@@ -503,6 +624,40 @@ fn analyze_methods(
             proc_macro2::Span::call_site(),
             "You must specify at least one handler with #[remote], #[local], or #[http] attribute. Without any handlers, this hyperprocess wouldn't respond to any requests.",
         ));
+    }
+
+    // Check for duplicate HTTP (method + path) combinations
+    // Only validate specific paths - allow multiple method-only handlers for dynamic routing
+    let mut http_routes = std::collections::HashMap::new();
+    for func in &function_metadata {
+        if func.is_http {
+            // Only validate handlers with specific paths
+            if let Some(path) = &func.http_path {
+                for method in &func.http_methods {
+                    let route_key = (method.clone(), path.clone());
+                    if let Some(existing_handler) = http_routes.get(&route_key) {
+                        return Err(syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!(
+                                "Duplicate HTTP route detected: {} {}\n\
+                                First handler: {}\n\
+                                Second handler: {}\n\
+                                \n\
+                                Each (method + specific path) combination must map to exactly one handler.\n\
+                                Consider:\n\
+                                - Using different paths for different handlers\n\
+                                - Combining the logic into a single handler\n\
+                                - Using method-only handlers with get_path() for dynamic routing",
+                                method, path, existing_handler, func.name
+                            ),
+                        ));
+                    }
+                    http_routes.insert(route_key, &func.name);
+                }
+            }
+            // Method-only handlers (no specific path) are allowed to coexist
+            // They can use get_path() at runtime to implement custom routing logic
+        }
     }
 
     Ok((init_method, ws_method, function_metadata, has_init_logging))
@@ -541,6 +696,13 @@ fn extract_function_metadata(
     // Create variant name (snake_case to CamelCase)
     let variant_name = to_camel_case(&ident.to_string());
 
+    // Parse HTTP attributes if this is an HTTP handler
+    let (http_methods, http_path) = if is_http {
+        parse_http_attributes(method)
+    } else {
+        (Vec::new(), None)
+    };
+
     FunctionMetadata {
         name: ident,
         variant_name,
@@ -550,6 +712,8 @@ fn extract_function_metadata(
         is_local,
         is_remote,
         is_http,
+        http_methods,
+        http_path,
     }
 }
 
@@ -598,13 +762,17 @@ fn generate_request_response_enums(
         return (quote! {}, quote! {});
     }
 
-    // HPMRequest enum variants
-    let request_variants = function_metadata.iter().map(|func| {
-        let variant_name = format_ident!("{}", &func.variant_name);
-        generate_enum_variant(&variant_name, &func.params)
-    });
+    // HPMRequest enum variants - ONLY include handlers that have parameters
+    // Parameter-less handlers are dispatched directly in Phase 1, not through enum deserialization
+    let request_variants = function_metadata
+        .iter()
+        //.filter(|func| !func.params.is_empty()) // Only include handlers with parameters
+        .map(|func| {
+            let variant_name = format_ident!("{}", &func.variant_name);
+            generate_enum_variant(&variant_name, &func.params)
+        });
 
-    // HPMResponse enum variants
+    // HPMResponse enum variants - include ALL handlers since they all need to return responses
     let response_variants = function_metadata.iter().map(|func| {
         let variant_name = format_ident!("{}", &func.variant_name);
 
@@ -648,7 +816,7 @@ fn generate_enum_variant(
     if params.is_empty() {
         // Changed to a struct variant with no fields for functions with no parameters
         // This matches the JSON format {"VariantName": {}} sent by the client
-        quote! { #variant_name{} }
+        quote! { #variant_name }
     } else if params.len() == 1 {
         // Simple tuple variant for single parameter
         let param_type = &params[0];
@@ -744,11 +912,26 @@ fn generate_response_handling(
             quote! {
                 // Instead of wrapping in HPMResponse enum, directly serialize the result
                 let response_bytes = serde_json::to_vec(&result).unwrap();
+
+                // Get headers from the current HTTP context
+                let headers_opt = hyperware_app_common::APP_HELPERS.with(|helpers| {
+                    helpers.borrow().current_http_context.as_ref().and_then(|ctx| {
+                        if ctx.response_headers.is_empty() {
+                            None
+                        } else {
+                            Some(ctx.response_headers.clone())
+                        }
+                    })
+                });
+
                 hyperware_process_lib::http::server::send_response(
                     hyperware_process_lib::http::StatusCode::OK,
-                    None,
+                    headers_opt,
                     response_bytes
                 );
+
+                // Clear HTTP context immediately after sending the response
+                hyperware_app_common::clear_http_request_context();
             }
         }
     }
@@ -902,135 +1085,506 @@ fn ws_method_opt_to_call(ws_method: &Option<syn::Ident>) -> proc_macro2::TokenSt
     }
 }
 
-/// Generate handler functions for message types
+//------------------------------------------------------------------------------
+// HTTP Helper Functions
+//------------------------------------------------------------------------------
+
+/// Generate HTTP context setup code
+fn generate_http_context_setup() -> proc_macro2::TokenStream {
+    quote! {
+        hyperware_app_common::APP_HELPERS.with(|helpers| {
+            helpers.borrow_mut().current_http_context = Some(hyperware_app_common::HttpRequestContext {
+                request: http_request,
+                response_headers: std::collections::HashMap::new(),
+            });
+        });
+        hyperware_process_lib::logging::debug!("HTTP context established");
+    }
+}
+
+/// Generate HTTP context cleanup code
+fn generate_http_context_cleanup() -> proc_macro2::TokenStream {
+    quote! {
+        hyperware_app_common::clear_http_request_context();
+    }
+}
+
+/// Generate HTTP error response handling
+fn generate_http_error_response(
+    status: &str,
+    message: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let status_ident = format_ident!("{}", status);
+    let cleanup = generate_http_context_cleanup();
+    quote! {
+        hyperware_process_lib::http::server::send_response(
+            hyperware_process_lib::http::StatusCode::#status_ident,
+            None,
+            #message.into_bytes()
+        );
+        #cleanup
+    }
+}
+
+/// Generate HTTP method and path parsing code
+fn generate_http_request_parsing() -> proc_macro2::TokenStream {
+    quote! {
+        let http_method = hyperware_app_common::get_http_method()
+            .unwrap_or_else(|| {
+                hyperware_process_lib::logging::warn!("Failed to get HTTP method from request context");
+                "UNKNOWN".to_string()
+            });
+
+        let current_path = match hyperware_app_common::get_path() {
+            Some(path) => {
+                hyperware_process_lib::logging::debug!("Successfully parsed HTTP path: '{}'", path);
+                path
+            },
+            None => {
+                hyperware_process_lib::logging::error!("Failed to get HTTP path: no HTTP context available");
+                hyperware_process_lib::http::server::send_response(
+                    hyperware_process_lib::http::StatusCode::BAD_REQUEST,
+                    None,
+                    b"Invalid path: no HTTP context available".to_vec(),
+                );
+                hyperware_app_common::clear_http_request_context();
+                return;
+            }
+        };
+    }
+}
+
+/// Generate parameterized handler dispatch arms
+fn generate_parameterized_handler_dispatch(
+    parameterized_handlers: &[&&FunctionMetadata],
+    self_ty: &Box<syn::Type>,
+    http_request_match_arms: &proc_macro2::TokenStream,
+    specific_paths: &[&String],
+) -> proc_macro2::TokenStream {
+    let mut sorted_handlers = parameterized_handlers.to_vec();
+    sorted_handlers.sort_by_key(|handler| handler.http_path.is_none());
+
+    let dispatch_arms: Vec<_> = sorted_handlers.iter().map(|handler| {
+        let fn_name = &handler.name;
+        let variant_name = format_ident!("{}", &handler.variant_name);
+        let path_check = if let Some(path) = &handler.http_path {
+            quote! { &current_path == #path }
+        } else {
+            quote! { ![#(#specific_paths),*].contains(&current_path.as_str()) }
+        };
+        let methods = &handler.http_methods;
+        let method_check = quote! { [#(#methods),*].contains(&http_method.as_str()) };
+
+        quote! {
+            hyperware_process_lib::logging::debug!("Checking parameterized handler {} for {} {} - path_check: {}, method_check: {}",
+                stringify!(#fn_name), http_method, current_path, (#path_check), (#method_check));
+            if #path_check && #method_check {
+                hyperware_process_lib::logging::debug!("Matched parameterized handler {} for {} {}", stringify!(#fn_name), http_method, current_path);
+
+                if let Some(ref blob) = blob_opt {
+                    hyperware_process_lib::logging::debug!("Got blob with {} bytes: {}", blob.bytes.len(), String::from_utf8_lossy(&blob.bytes));
+                    match serde_json::from_slice::<HPMRequest>(&blob.bytes) {
+                        Ok(request) => {
+                            match request {
+                                HPMRequest::#variant_name(..) => {
+                                    unsafe {
+                                        #http_request_match_arms
+                                        hyperware_app_common::maybe_save_state(&mut *state);
+                                    }
+                                },
+                                _ => {
+                                    hyperware_process_lib::logging::error!("Request body contains wrong handler name for {} {}", http_method, current_path);
+                                    hyperware_process_lib::http::server::send_response(
+                                        hyperware_process_lib::http::StatusCode::BAD_REQUEST,
+                                        None,
+                                        format!("Expected handler name '{}' in request body", stringify!(#variant_name)).into_bytes()
+                                    );
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            let error_details = if blob.bytes.is_empty() {
+                                "Request body is empty but was expected to contain handler parameters.".to_string()
+                            } else if let Ok(json_value) = serde_json::from_slice::<serde_json::Value>(&blob.bytes) {
+                                format!(
+                                    "Invalid request format. Expected one of the parameterized handler formats, but got: {}",
+                                    serde_json::to_string(&json_value).unwrap_or_else(|_| "invalid JSON".to_string())
+                                )
+                            } else {
+                                format!(
+                                    "Invalid JSON in request body. Parse error: {}",
+                                    e
+                                )
+                            };
+
+                            hyperware_process_lib::logging::error!("Failed to parse request body for {} {}: {}", http_method, current_path, error_details);
+
+                            hyperware_process_lib::http::server::send_response(
+                                hyperware_process_lib::http::StatusCode::BAD_REQUEST,
+                                None,
+                                error_details.into_bytes()
+                            );
+                            hyperware_app_common::clear_http_request_context();
+                            return;
+                        }
+                    }
+                } else {
+                    hyperware_process_lib::logging::error!("Handler {} requires a request body", stringify!(#fn_name));
+                    hyperware_process_lib::http::server::send_response(
+                        hyperware_process_lib::http::StatusCode::BAD_REQUEST,
+                        None,
+                        format!("Handler {} requires a request body", stringify!(#fn_name)).into_bytes()
+                    );
+                }
+                return;
+            }
+        }
+    }).collect();
+
+    quote! { #(#dispatch_arms)* }
+}
+
+/// Generate parameterless handler dispatch arms
+fn generate_parameterless_handler_dispatch(
+    parameterless_handlers: &[&&FunctionMetadata],
+    self_ty: &Box<syn::Type>,
+    specific_paths: &[&String],
+) -> proc_macro2::TokenStream {
+    let mut sorted_handlers = parameterless_handlers.to_vec();
+    sorted_handlers.sort_by_key(|handler| handler.http_path.is_none());
+
+    let dispatch_arms: Vec<_> = sorted_handlers.iter().map(|handler| {
+        let fn_name = &handler.name;
+        let path_check = if let Some(path) = &handler.http_path {
+            quote! { &current_path == #path }
+        } else {
+            quote! { ![#(#specific_paths),*].contains(&current_path.as_str()) }
+        };
+        let methods = &handler.http_methods;
+        let method_check = quote! { [#(#methods),*].contains(&http_method.as_str()) };
+
+        let response_handling = quote! {
+            let response_bytes = match serde_json::to_vec(&result) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    hyperware_process_lib::logging::error!("Failed to serialize response: {}", e);
+                    hyperware_process_lib::http::server::send_response(
+                        hyperware_process_lib::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        None,
+                        "Failed to serialize response".as_bytes().to_vec(),
+                    );
+                    return;
+                }
+            };
+
+            let headers_opt = hyperware_app_common::APP_HELPERS.with(|helpers| {
+                helpers.borrow().current_http_context.as_ref().and_then(|ctx| {
+                    if ctx.response_headers.is_empty() {
+                        None
+                    } else {
+                        Some(ctx.response_headers.clone())
+                    }
+                })
+            });
+
+            hyperware_process_lib::http::server::send_response(
+                hyperware_process_lib::http::StatusCode::OK,
+                headers_opt,
+                response_bytes
+            );
+
+            hyperware_app_common::clear_http_request_context();
+        };
+
+        let handler_body = if handler.is_async {
+            quote! {
+                let state_ptr: *mut #self_ty = state;
+                hyperware_app_common::hyper! {
+                    let result = unsafe { (*state_ptr).#fn_name().await };
+                    #response_handling
+                }
+                unsafe { hyperware_app_common::maybe_save_state(&mut *state); }
+            }
+        } else {
+            quote! {
+                let result = unsafe { (*state).#fn_name() };
+                #response_handling
+                unsafe { hyperware_app_common::maybe_save_state(&mut *state); }
+            }
+        };
+
+        quote! {
+            hyperware_process_lib::logging::debug!("Checking parameter-less handler {} for {} {} - path_check: {}, method_check: {}",
+                stringify!(#fn_name), http_method, current_path, (#path_check), (#method_check));
+            if #path_check && #method_check {
+                hyperware_process_lib::logging::debug!("Matched parameter-less handler {} for {} {}", stringify!(#fn_name), http_method, current_path);
+                #handler_body
+                return;
+            }
+        }
+    }).collect();
+
+    quote! { #(#dispatch_arms)* }
+}
+
+/// Generate HTTP handler dispatcher
+fn generate_http_handler_dispatcher(
+    http_handlers: &[&FunctionMetadata],
+    self_ty: &Box<syn::Type>,
+    http_request_match_arms: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let specific_paths: Vec<_> = http_handlers
+        .iter()
+        .filter_map(|h| h.http_path.as_ref())
+        .collect();
+
+    let parameterized_handlers: Vec<_> = http_handlers
+        .iter()
+        .filter(|h| !h.params.is_empty())
+        .collect();
+
+    let parameterless_handlers: Vec<_> = http_handlers
+        .iter()
+        .filter(|h| h.params.is_empty())
+        .collect();
+
+    let parameterized_dispatch = generate_parameterized_handler_dispatch(
+        &parameterized_handlers,
+        self_ty,
+        http_request_match_arms,
+        &specific_paths,
+    );
+
+    let parameterless_dispatch =
+        generate_parameterless_handler_dispatch(&parameterless_handlers, self_ty, &specific_paths);
+
+    quote! {
+        hyperware_process_lib::logging::debug!("Starting handler matching for {} {}", http_method, current_path);
+
+        if blob_opt.is_some() && !blob_opt.as_ref().unwrap().bytes.is_empty() {
+            hyperware_process_lib::logging::debug!("Request has body, using two-phase matching");
+
+            if let Some(ref blob) = blob_opt {
+                match serde_json::from_slice::<HPMRequest>(&blob.bytes) {
+                    Ok(request) => {
+                        hyperware_process_lib::logging::debug!("Successfully parsed request body, dispatching to specific handler");
+                        unsafe {
+                            #http_request_match_arms
+                            hyperware_app_common::maybe_save_state(&mut *state);
+                        }
+                        return;
+                    },
+                    Err(e) => {
+                        let error_details = if blob.bytes.is_empty() {
+                            "Request body is empty but was expected to contain handler parameters.".to_string()
+                        } else if let Ok(json_value) = serde_json::from_slice::<serde_json::Value>(&blob.bytes) {
+                            format!(
+                                "Invalid request format. Expected one of the parameterized handler formats, but got: {}",
+                                serde_json::to_string(&json_value).unwrap_or_else(|_| "invalid JSON".to_string())
+                            )
+                        } else {
+                            format!(
+                                "Invalid JSON in request body. Parse error: {}",
+                                e
+                            )
+                        };
+
+                        hyperware_process_lib::logging::error!("Failed to parse request body for {} {}: {}", http_method, current_path, error_details);
+
+                        hyperware_process_lib::http::server::send_response(
+                            hyperware_process_lib::http::StatusCode::BAD_REQUEST,
+                            None,
+                            error_details.into_bytes()
+                        );
+                        hyperware_app_common::clear_http_request_context();
+                        return;
+                    }
+                }
+            }
+        } else {
+            hyperware_process_lib::logging::debug!("Request has no body, trying parameter-less handlers first");
+            #parameterless_dispatch
+        }
+
+        hyperware_process_lib::logging::error!("No handler found for {} {} - all handlers checked", http_method, current_path);
+        hyperware_process_lib::http::server::send_response(
+            hyperware_process_lib::http::StatusCode::NOT_FOUND,
+            None,
+            format!("No handler found for {} {}", http_method, current_path).into_bytes(),
+        );
+        hyperware_app_common::clear_http_request_context();
+    }
+}
+
+//------------------------------------------------------------------------------
+// WebSocket Helper Functions
+//------------------------------------------------------------------------------
+
+/// Generate WebSocket message handler
+fn generate_websocket_handler(
+    ws_method_call: &proc_macro2::TokenStream,
+    self_ty: &Box<syn::Type>,
+) -> proc_macro2::TokenStream {
+    quote! {
+        hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
+            hyperware_process_lib::logging::debug!("Received WebSocket message on channel {}, type: {:?}", channel_id, message_type);
+
+            let Some(blob) = blob_opt else {
+                hyperware_process_lib::logging::error!(
+                    "Failed to get blob for WebSocketPush on channel {}. This indicates a malformed WebSocket message.",
+                    channel_id
+                );
+                return;
+            };
+
+            hyperware_process_lib::logging::debug!("Processing WebSocket message with {} bytes", blob.bytes.len());
+            #ws_method_call
+
+            unsafe {
+                hyperware_app_common::maybe_save_state(&mut *state);
+            }
+        },
+        hyperware_process_lib::http::server::HttpServerRequest::WebSocketOpen { path, channel_id } => {
+            hyperware_process_lib::logging::debug!("WebSocket connection opened on path '{}' with channel {}", path, channel_id);
+            match hyperware_app_common::get_server() {
+                Some(server) => server.handle_websocket_open(&path, channel_id),
+                None => hyperware_process_lib::logging::error!("Failed to get server instance for WebSocket open event")
+            }
+        },
+        hyperware_process_lib::http::server::HttpServerRequest::WebSocketClose(channel_id) => {
+            hyperware_process_lib::logging::debug!("WebSocket connection closed on channel {}", channel_id);
+            match hyperware_app_common::get_server() {
+                Some(server) => server.handle_websocket_close(channel_id),
+                None => hyperware_process_lib::logging::error!("Failed to get server instance for WebSocket close event")
+            }
+        }
+    }
+}
+
+//------------------------------------------------------------------------------
+// Local/Remote Message Helper Functions
+//------------------------------------------------------------------------------
+
+/// Generate local message handler
+fn generate_local_message_handler(
+    self_ty: &Box<syn::Type>,
+    match_arms: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        /// Handle local messages
+        fn handle_local_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
+            hyperware_process_lib::logging::debug!("Processing local message from: {:?}", message.source());
+            match serde_json::from_slice::<HPMRequest>(message.body()) {
+                Ok(request) => {
+                    unsafe {
+                        #match_arms
+                        hyperware_app_common::maybe_save_state(&mut *state);
+                    }
+                },
+                Err(e) => {
+                    let raw_body = String::from_utf8_lossy(message.body());
+                    hyperware_process_lib::logging::error!(
+                        "Failed to deserialize local request into HPMRequest enum.\n\
+                        Error: {}\n\
+                        Source: {:?}\n\
+                        Body: {}\n\
+                        \n\
+                        💡 This usually means the message format doesn't match any of your #[local] or #[remote] handlers.",
+                        e, message.source(), raw_body
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Generate remote message handler
+fn generate_remote_message_handler(
+    self_ty: &Box<syn::Type>,
+    match_arms: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        /// Handle remote messages
+        fn handle_remote_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
+            hyperware_process_lib::logging::debug!("Processing remote message from: {:?}", message.source());
+            match serde_json::from_slice::<HPMRequest>(message.body()) {
+                Ok(request) => {
+                    unsafe {
+                        #match_arms
+                        hyperware_app_common::maybe_save_state(&mut *state);
+                    }
+                },
+                Err(e) => {
+                    let raw_body = String::from_utf8_lossy(message.body());
+                    hyperware_process_lib::logging::error!(
+                        "Failed to deserialize remote request into HPMRequest enum.\n\
+                        Error: {}\n\
+                        Source: {:?}\n\
+                        Body: {}\n\
+                        \n\
+                        💡 This usually means the message format doesn't match any of your #[remote] handlers.",
+                        e, message.source(), raw_body
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Generate message handler functions for message types
 fn generate_message_handlers(
     self_ty: &Box<syn::Type>,
     handler_arms: &HandlerDispatch,
     ws_method_call: &proc_macro2::TokenStream,
+    http_handlers: &[&FunctionMetadata],
 ) -> proc_macro2::TokenStream {
     let http_request_match_arms = &handler_arms.http;
-    let local_request_match_arms = &handler_arms.local;
-    let remote_request_match_arms = &handler_arms.remote;
-    // We now use the combined local_and_remote handlers for local messages
     let local_and_remote_request_match_arms = &handler_arms.local_and_remote;
+    let remote_request_match_arms = &handler_arms.remote;
+
+    let http_context_setup = generate_http_context_setup();
+    let http_request_parsing = generate_http_request_parsing();
+    let http_dispatcher =
+        generate_http_handler_dispatcher(http_handlers, self_ty, http_request_match_arms);
+    let websocket_handlers = generate_websocket_handler(ws_method_call, self_ty);
+    let local_message_handler =
+        generate_local_message_handler(self_ty, local_and_remote_request_match_arms);
+    let remote_message_handler =
+        generate_remote_message_handler(self_ty, remote_request_match_arms);
 
     quote! {
         /// Handle messages from the HTTP server
         fn handle_http_server_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
-            // Parse HTTP server request
+            let blob_opt = message.blob();
+
             match serde_json::from_slice::<hyperware_process_lib::http::server::HttpServerRequest>(message.body()) {
                 Ok(http_server_request) => {
                     match http_server_request {
                         hyperware_process_lib::http::server::HttpServerRequest::Http(http_request) => {
-                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                ctx.borrow_mut().current_path = Some(http_request.path().clone().expect("Failed to get path from HTTP request"));
-                            });
-
-                            // Get the blob containing the actual request
-                            let Some(blob) = message.blob() else {
-                                hyperware_process_lib::logging::warn!("Failed to get blob for HTTP, sending BAD_REQUEST");
-                                hyperware_process_lib::http::server::send_response(
-                                    hyperware_process_lib::http::StatusCode::BAD_REQUEST,
-                                    None,
-                                    vec![]
-                                );
-                                return;
-                            };
-
-                            // Process HTTP request
-                            match serde_json::from_slice::<HPMRequest>(&blob.bytes) {
-                                Ok(request) => {
-                                    // Handle the HTTP request
-                                    unsafe {
-                                        #http_request_match_arms
-
-                                        // Save state if needed
-                                        hyperware_app_common::maybe_save_state(&mut *state);
-                                    }
-                                },
-                                Err(e) => {
-                                    hyperware_process_lib::logging::warn!(
-                                        "Failed to deserialize HTTP request into HPMRequest enum: {}\n{:?}",
-                                        e,
-                                        serde_json::from_slice::<serde_json::Value>(&blob.bytes),
-                                    );
-                                    hyperware_process_lib::http::server::send_response(
-                                        hyperware_process_lib::http::StatusCode::BAD_REQUEST,
-                                        None,
-                                        format!("Invalid request format: {}", e).into_bytes()
-                                    );
-                                }
+                            hyperware_process_lib::logging::debug!("Processing HTTP request, message has blob: {}", blob_opt.is_some());
+                            if let Some(ref blob) = blob_opt {
+                                hyperware_process_lib::logging::debug!("Blob size: {} bytes, content: {}", blob.bytes.len(), String::from_utf8_lossy(&blob.bytes[..std::cmp::min(200, blob.bytes.len())]));
                             }
-                            hyperware_app_common::APP_HELPERS.with(|ctx| {
-                                ctx.borrow_mut().current_path = None;
-                            });
-                        },
-                        hyperware_process_lib::http::server::HttpServerRequest::WebSocketPush { channel_id, message_type } => {
-                            let Some(blob) = message.blob() else {
-                                hyperware_process_lib::logging::warn!("Failed to get blob for WebSocketPush, exiting");
-                                return;
-                            };
 
-                            // Call the websocket handler if it exists
-                            #ws_method_call
-
-                            // Save state if needed
-                            unsafe {
-                                hyperware_app_common::maybe_save_state(&mut *state);
-                            }
+                            #http_context_setup
+                            #http_request_parsing
+                            #http_dispatcher
                         },
-                        hyperware_process_lib::http::server::HttpServerRequest::WebSocketOpen { path, channel_id } => {
-                            hyperware_app_common::get_server().unwrap().handle_websocket_open(&path, channel_id);
-                        },
-                        hyperware_process_lib::http::server::HttpServerRequest::WebSocketClose(channel_id) => {
-                            hyperware_app_common::get_server().unwrap().handle_websocket_close(channel_id);
-                        }
+                        #websocket_handlers
                     }
                 },
                 Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to parse HTTP server request: {}", e);
+                    hyperware_process_lib::logging::error!(
+                        "Failed to parse HTTP server request: {}\n\
+                        This usually indicates a malformed message to the HTTP server.",
+                        e
+                    );
                 }
             }
         }
 
-        /// Handle local messages
-        fn handle_local_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
-            // Process the local request based on our handlers (now including both local and remote handlers)
-            match serde_json::from_slice::<HPMRequest>(message.body()) {
-                Ok(request) => {
-                    unsafe {
-                        // Match on the request variant and call the appropriate handler
-                        // Now using combined local_and_remote handlers
-                        #local_and_remote_request_match_arms
-
-                        // Save state if needed
-                        hyperware_app_common::maybe_save_state(&mut *state);
-                    }
-                },
-                Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to deserialize local request into HPMRequest enum: {}", e);
-                }
-            }
-        }
-
-        /// Handle remote messages
-        fn handle_remote_message(state: *mut #self_ty, message: hyperware_process_lib::Message) {
-            // Process the remote request based on our handlers
-            match serde_json::from_slice::<HPMRequest>(message.body()) {
-                Ok(request) => {
-                    unsafe {
-                        // Match on the request variant and call the appropriate handler
-                        #remote_request_match_arms
-
-                        // Save state if needed
-                        hyperware_app_common::maybe_save_state(&mut *state);
-                    }
-                },
-                Err(e) => {
-                    hyperware_process_lib::logging::warn!("Failed to deserialize remote request into HPMRequest enum: {}\nRaw request value: {:?}", e, message.body());
-                }
-            }
-        }
+        #local_message_handler
+        #remote_message_handler
     }
 }
 
@@ -1055,6 +1609,7 @@ fn generate_component_impl(
     ws_method_details: &WsMethodDetails,
     handler_arms: &HandlerDispatch,
     has_init_logging: bool,
+    http_handlers: &[&FunctionMetadata],
 ) -> proc_macro2::TokenStream {
     // Extract values from args for use in the quote macro
     let name = &args.name;
@@ -1088,7 +1643,8 @@ fn generate_component_impl(
     let ws_method_call = &ws_method_details.call;
 
     // Generate message handler functions
-    let message_handlers = generate_message_handlers(self_ty, handler_arms, ws_method_call);
+    let message_handlers =
+        generate_message_handlers(self_ty, handler_arms, ws_method_call, http_handlers);
 
     // Generate the logging initialization conditionally
     let logging_init = if !has_init_logging {
@@ -1175,6 +1731,11 @@ fn generate_component_impl(
                             hyperware_app_common::APP_HELPERS.with(|ctx| {
                                 ctx.borrow_mut().current_message = Some(message.clone());
                             });
+
+                            // Store old state if needed (for OnDiff save option)
+                            // This only stores if old_state is None (first time or after a save)
+                            hyperware_app_common::store_old_state(&state);
+
                             match message {
                                 hyperware_process_lib::Message::Response { body, context, .. } => {
                                     let correlation_id = context
@@ -1253,14 +1814,31 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Filter functions by handler type
     let handlers = HandlerGroups::from_function_metadata(&function_metadata);
 
-    // Generate HPMRequest and HPMResponse enums
-    let (request_enum, response_enum) = generate_request_response_enums(&function_metadata);
+    // HTTP handlers with parameters will be part of the HPMRequest enum and dispatched via body deserialization.
+    let http_handlers_with_params: Vec<_> = handlers
+        .http
+        .iter()
+        //.filter(|h| !h.params.is_empty())
+        .cloned()
+        .collect();
+
+    // Collect all function metadata that will be represented in the HPMRequest enum.
+    // This includes all local and remote handlers, plus HTTP handlers that have parameters.
+    let metadata_for_enum: Vec<_> = function_metadata
+        .iter()
+        //.filter(|f| !f.is_http || !f.params.is_empty())
+        .cloned()
+        .collect();
+
+    // Generate HPMRequest and HPMResponse enums from the filtered list of functions
+    let (request_enum, response_enum) = generate_request_response_enums(&metadata_for_enum);
 
     // Generate handler match arms
     let handler_arms = HandlerDispatch {
         local: generate_handler_dispatch(&handlers.local, self_ty, HandlerType::Local),
         remote: generate_handler_dispatch(&handlers.remote, self_ty, HandlerType::Remote),
-        http: generate_handler_dispatch(&handlers.http, self_ty, HandlerType::Http),
+        // HTTP dispatch arms are only generated for handlers with parameters.
+        http: generate_handler_dispatch(&http_handlers_with_params, self_ty, HandlerType::Http),
         // Generate dispatch for combined local and remote handlers
         local_and_remote: generate_handler_dispatch(
             &handlers.local_and_remote,
@@ -1295,6 +1873,7 @@ pub fn hyperprocess(attr: TokenStream, item: TokenStream) -> TokenStream {
         &ws_method_details,
         &handler_arms,
         has_init_logging,
+        &handlers.http,
     )
     .into()
 }

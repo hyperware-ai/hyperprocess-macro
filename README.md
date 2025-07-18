@@ -135,13 +135,14 @@ Example:
 
 ### Handler Types
 
-Hyperware processes can handle three types of requests, specified by attributes:
+Hyperware processes can handle four types of requests, specified by attributes:
 
 | Attribute | Description |
 |-----------|-------------|
 | `#[local]` | Handles local (same-node) requests |
 | `#[remote]` | Handles remote (cross-node) requests |
 | `#[http]` | Handles HTTP requests to your process endpoints |
+| `#[terminal]` | Handles terminal requests from the system terminal |
 
 These attributes can be combined to make a handler respond to multiple request types:
 
@@ -157,6 +158,47 @@ async fn increment_counter(&mut self, value: i32) -> i32 {
 fn get_status(&mut self) -> String {
     format!("Status: {}", self.counter)
 }
+
+#[terminal]
+fn handle_terminal_command(&mut self, command: String) -> String {
+    match command.as_str() {
+        "status" => format!("Counter: {}", self.counter),
+        "reset" => {
+            self.counter = 0;
+            "Counter reset".to_string()
+        }
+        _ => "Unknown command".to_string()
+    }
+}
+```
+
+#### Messaging Terminal Handlers
+
+To send messages to terminal handlers from the Hyperdrive terminal, use the `m` command:
+
+```bash
+m - message a process
+Usage: m <ADDRESS> <BODY>
+Arguments:
+  <ADDRESS> hns address e.g. some-node.os@process:pkg:publisher.os
+  <BODY>    json payload wrapped in single quotes, e.g. '{"foo": "bar"}'
+Options:
+  -a, --await <SECONDS> await the response, timing out after SECONDS
+Example:
+  m -a 5 our@foo:bar:baz '{"some payload": "value"}'
+    - this will await the response and print it out
+  m our@foo:bar:baz '{"some payload": "value"}'
+    - this one will not await the response or print it out
+```
+
+For terminal handlers, the JSON body should match the generated request enum variant. For example, if you have a terminal handler named `handle_terminal_command` that takes a `String` parameter:
+
+```bash
+# Send a command and await the response
+m -a 5 our@my-process:my-package:my-publisher.os '{"HandleTerminalCommand": "status"}'
+
+# Send a command without waiting for response
+m our@my-process:my-package:my-publisher.os '{"HandleTerminalCommand": "reset"}'
 ```
 
 The function arguments and the return values _have_ to be serializable with `Serde`.
@@ -263,6 +305,18 @@ impl AsyncRequesterState {
     #[remote]
     fn get_count(&mut self) -> u64 {
         self.request_count
+    }
+
+    #[terminal]
+    fn handle_terminal(&mut self, command: String) -> String {
+        match command.as_str() {
+            "stats" => format!("Requests processed: {}", self.request_count),
+            "clear" => {
+                self.request_count = 0;
+                "Request count cleared".to_string()
+            }
+            _ => "Available commands: stats, clear".to_string()
+        }
     }
 
     #[ws]
@@ -587,6 +641,9 @@ async fn get_user(&mut self, id: u64) -> User { ... }
 #[local]
 #[remote]
 fn update_settings(&mut self, settings: Settings, apply_now: bool) -> bool { ... }
+
+#[terminal]
+fn execute_command(&mut self, cmd: String) -> String { ... }
 ```
 
 The macro generates these enums:
@@ -595,11 +652,13 @@ The macro generates these enums:
 enum Request {
     GetUser(u64),
     UpdateSettings(Settings, bool),
+    ExecuteCommand(String),
 }
 
 enum Response {
     GetUser(User),
     UpdateSettings(bool),
+    ExecuteCommand(String),
 }
 ```
 
@@ -781,11 +840,12 @@ graph TB
                 MsgRouter -->|"HTTP"| HttpHandler["HTTP Handlers"]
                 MsgRouter -->|"Local"| LocalHandler["Local Handlers"]
                 MsgRouter -->|"Remote"| RemoteHandler["Remote Handlers"]
+                MsgRouter -->|"Terminal"| TerminalHandler["Terminal Handlers"]
                 MsgRouter -->|"WebSocket"| WsHandler["WebSocket Handlers"]
                 MsgRouter -->|"Response"| RespHandler["Response Handler"]
                 
                 %% State management
-                HttpHandler & LocalHandler & RemoteHandler & WsHandler --> AppState[("Application State
+                HttpHandler & LocalHandler & RemoteHandler & TerminalHandler & WsHandler --> AppState[("Application State
                 SaveOptions::EveryMessage")]
                 
                 %% Async handling
@@ -852,7 +912,7 @@ graph TB
     %% Style elements
     class UserSrc,WitFiles,CallerUtils,EnumStructs,ReqResEnums,HandlerDisp,AsyncRuntime,MainLoop,WasmComp mainflow
     class MsgLoop,Executor,RespRegistry,RespHandler,AF2,AF8 accent
-    class MsgRouter,HttpHandler,LocalHandler,RemoteHandler,WsHandler,CallStub,AppState dataflow
+    class MsgRouter,HttpHandler,LocalHandler,RemoteHandler,TerminalHandler,WsHandler,CallStub,AppState dataflow
     class AF1,AF3,AF4,AF5,AF6,AF7,AF9 asyncflow
     class ExtClient1,ExtClient2,Process2,Storage,InMsg,OutMsg external
     class CorrelationNote annotation

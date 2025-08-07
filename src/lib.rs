@@ -914,7 +914,7 @@ fn generate_response_handling(
                 let response_bytes = serde_json::to_vec(&result).unwrap();
 
                 // Get headers from the current HTTP context
-                let headers_opt = hyperware_app_common::APP_HELPERS.with(|helpers| {
+                let headers_opt = hyperware_process_lib::hyperapp::APP_HELPERS.with(|helpers| {
                     helpers.borrow().current_http_context.as_ref().and_then(|ctx| {
                         if ctx.response_headers.is_empty() {
                             None
@@ -931,7 +931,7 @@ fn generate_response_handling(
                 );
 
                 // Clear HTTP context immediately after sending the response
-                hyperware_app_common::clear_http_request_context();
+                hyperware_process_lib::hyperapp::clear_http_request_context();
             }
         }
     }
@@ -951,7 +951,7 @@ fn generate_async_handler_arm(
             HPMRequest::#variant_name{} => {
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper! {
+                hyperware_process_lib::hyperapp::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
@@ -965,7 +965,7 @@ fn generate_async_handler_arm(
                 let param_captured = param;  // Capture param before moving into async block
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper! {
+                hyperware_process_lib::hyperapp::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(param_captured).await };
                     #response_handling
@@ -989,7 +989,7 @@ fn generate_async_handler_arm(
                 #(#capture_statements)*
                 // Create a raw pointer to state for use in the async block
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper! {
+                hyperware_process_lib::hyperapp::hyper! {
                     // Inside the async block, use the pointer to access state
                     let result = unsafe { (*state_ptr).#fn_name(#(#captured_names),*).await };
                     #response_handling
@@ -1057,7 +1057,7 @@ fn init_method_opt_to_call(
         quote! {
             // Create a pointer to state for use in the async block
             let state_ptr: *mut #self_ty = &mut state;
-            hyperware_app_common::hyper! {
+            hyperware_process_lib::hyperapp::hyper! {
                 // Inside the async block, use the pointer to access state
                 unsafe { (*state_ptr).#method_name().await };
             }
@@ -1092,8 +1092,8 @@ fn ws_method_opt_to_call(ws_method: &Option<syn::Ident>) -> proc_macro2::TokenSt
 /// Generate HTTP context setup code
 fn generate_http_context_setup() -> proc_macro2::TokenStream {
     quote! {
-        hyperware_app_common::APP_HELPERS.with(|helpers| {
-            helpers.borrow_mut().current_http_context = Some(hyperware_app_common::HttpRequestContext {
+        hyperware_process_lib::hyperapp::APP_HELPERS.with(|helpers| {
+            helpers.borrow_mut().current_http_context = Some(hyperware_process_lib::hyperapp::HttpRequestContext {
                 request: http_request,
                 response_headers: std::collections::HashMap::new(),
             });
@@ -1105,7 +1105,7 @@ fn generate_http_context_setup() -> proc_macro2::TokenStream {
 /// Generate HTTP context cleanup code
 fn generate_http_context_cleanup() -> proc_macro2::TokenStream {
     quote! {
-        hyperware_app_common::clear_http_request_context();
+        hyperware_process_lib::hyperapp::clear_http_request_context();
     }
 }
 
@@ -1129,13 +1129,13 @@ fn generate_http_error_response(
 /// Generate HTTP method and path parsing code
 fn generate_http_request_parsing() -> proc_macro2::TokenStream {
     quote! {
-        let http_method = hyperware_app_common::get_http_method()
+        let http_method = hyperware_process_lib::hyperapp::get_http_method()
             .unwrap_or_else(|| {
                 hyperware_process_lib::logging::warn!("Failed to get HTTP method from request context");
                 "UNKNOWN".to_string()
             });
 
-        let current_path = match hyperware_app_common::get_path() {
+        let current_path = match hyperware_process_lib::hyperapp::get_path() {
             Some(path) => {
                 hyperware_process_lib::logging::debug!("Successfully parsed HTTP path: '{}'", path);
                 path
@@ -1147,7 +1147,7 @@ fn generate_http_request_parsing() -> proc_macro2::TokenStream {
                     None,
                     b"Invalid path: no HTTP context available".to_vec(),
                 );
-                hyperware_app_common::clear_http_request_context();
+                hyperware_process_lib::hyperapp::clear_http_request_context();
                 return;
             }
         };
@@ -1189,7 +1189,7 @@ fn generate_parameterized_handler_dispatch(
                                 HPMRequest::#variant_name(..) => {
                                     unsafe {
                                         #http_request_match_arms
-                                        hyperware_app_common::maybe_save_state(&mut *state);
+                                        hyperware_process_lib::hyperapp::maybe_save_state(&mut *state);
                                     }
                                 },
                                 _ => {
@@ -1224,7 +1224,7 @@ fn generate_parameterized_handler_dispatch(
                                 None,
                                 error_details.into_bytes()
                             );
-                            hyperware_app_common::clear_http_request_context();
+                            hyperware_process_lib::hyperapp::clear_http_request_context();
                             return;
                         }
                     }
@@ -1277,7 +1277,7 @@ fn generate_parameterless_handler_dispatch(
                 }
             };
 
-            let headers_opt = hyperware_app_common::APP_HELPERS.with(|helpers| {
+            let headers_opt = hyperware_process_lib::hyperapp::APP_HELPERS.with(|helpers| {
                 helpers.borrow().current_http_context.as_ref().and_then(|ctx| {
                     if ctx.response_headers.is_empty() {
                         None
@@ -1293,23 +1293,23 @@ fn generate_parameterless_handler_dispatch(
                 response_bytes
             );
 
-            hyperware_app_common::clear_http_request_context();
+            hyperware_process_lib::hyperapp::clear_http_request_context();
         };
 
         let handler_body = if handler.is_async {
             quote! {
                 let state_ptr: *mut #self_ty = state;
-                hyperware_app_common::hyper! {
+                hyperware_process_lib::hyperapp::hyper! {
                     let result = unsafe { (*state_ptr).#fn_name().await };
                     #response_handling
                 }
-                unsafe { hyperware_app_common::maybe_save_state(&mut *state); }
+                unsafe { hyperware_process_lib::hyperapp::maybe_save_state(&mut *state); }
             }
         } else {
             quote! {
                 let result = unsafe { (*state).#fn_name() };
                 #response_handling
-                unsafe { hyperware_app_common::maybe_save_state(&mut *state); }
+                unsafe { hyperware_process_lib::hyperapp::maybe_save_state(&mut *state); }
             }
         };
 
@@ -1370,7 +1370,7 @@ fn generate_http_handler_dispatcher(
                         hyperware_process_lib::logging::debug!("Successfully parsed request body, dispatching to specific handler");
                         unsafe {
                             #http_request_match_arms
-                            hyperware_app_common::maybe_save_state(&mut *state);
+                            hyperware_process_lib::hyperapp::maybe_save_state(&mut *state);
                         }
                         return;
                     },
@@ -1396,7 +1396,7 @@ fn generate_http_handler_dispatcher(
                             None,
                             error_details.into_bytes()
                         );
-                        hyperware_app_common::clear_http_request_context();
+                        hyperware_process_lib::hyperapp::clear_http_request_context();
                         return;
                     }
                 }
@@ -1412,7 +1412,7 @@ fn generate_http_handler_dispatcher(
             None,
             format!("No handler found for {} {}", http_method, current_path).into_bytes(),
         );
-        hyperware_app_common::clear_http_request_context();
+        hyperware_process_lib::hyperapp::clear_http_request_context();
     }
 }
 
@@ -1441,19 +1441,19 @@ fn generate_websocket_handler(
             #ws_method_call
 
             unsafe {
-                hyperware_app_common::maybe_save_state(&mut *state);
+                hyperware_process_lib::hyperapp::maybe_save_state(&mut *state);
             }
         },
         hyperware_process_lib::http::server::HttpServerRequest::WebSocketOpen { path, channel_id } => {
             hyperware_process_lib::logging::debug!("WebSocket connection opened on path '{}' with channel {}", path, channel_id);
-            match hyperware_app_common::get_server() {
+            match hyperware_process_lib::hyperapp::get_server() {
                 Some(server) => server.handle_websocket_open(&path, channel_id),
                 None => hyperware_process_lib::logging::error!("Failed to get server instance for WebSocket open event")
             }
         },
         hyperware_process_lib::http::server::HttpServerRequest::WebSocketClose(channel_id) => {
             hyperware_process_lib::logging::debug!("WebSocket connection closed on channel {}", channel_id);
-            match hyperware_app_common::get_server() {
+            match hyperware_process_lib::hyperapp::get_server() {
                 Some(server) => server.handle_websocket_close(channel_id),
                 None => hyperware_process_lib::logging::error!("Failed to get server instance for WebSocket close event")
             }
@@ -1478,7 +1478,7 @@ fn generate_local_message_handler(
                 Ok(request) => {
                     unsafe {
                         #match_arms
-                        hyperware_app_common::maybe_save_state(&mut *state);
+                        hyperware_process_lib::hyperapp::maybe_save_state(&mut *state);
                     }
                 },
                 Err(e) => {
@@ -1511,7 +1511,7 @@ fn generate_remote_message_handler(
                 Ok(request) => {
                     unsafe {
                         #match_arms
-                        hyperware_app_common::maybe_save_state(&mut *state);
+                        hyperware_process_lib::hyperapp::maybe_save_state(&mut *state);
                     }
                 },
                 Err(e) => {
@@ -1669,10 +1669,10 @@ fn generate_component_impl(
             additional_derives: [serde::Deserialize, serde::Serialize, process_macros::SerdeJsonInto],
         });
 
-        use hyperware_app_common::hyperware_process_lib as hyperware_process_lib;
+        use hyperware_process_lib::hyperapp::hyperware_process_lib as hyperware_process_lib;
         use hyperware_process_lib::http::server::HttpBindingConfig;
         use hyperware_process_lib::http::server::WsBindingConfig;
-        use hyperware_app_common::Binding;
+        use hyperware_process_lib::hyperapp::Binding;
 
         #cleaned_impl_block
 
@@ -1686,12 +1686,12 @@ fn generate_component_impl(
         impl Guest for Component {
             fn init(_our: String) {
                 // Initialize our state
-                let mut state = hyperware_app_common::initialize_state::<#self_ty>();
+                let mut state = hyperware_process_lib::hyperapp::initialize_state::<#self_ty>();
 
                 // Set to persist state according to user setting
-                hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                hyperware_process_lib::hyperapp::APP_CONTEXT.with(|ctx| {
                     ctx.borrow_mut().hidden_state = Some(
-                        hyperware_app_common::HiddenState::new(#save_config)
+                        hyperware_process_lib::hyperapp::HiddenState::new(#save_config)
                     );
                 });
 
@@ -1710,8 +1710,8 @@ fn generate_component_impl(
                 #logging_init
 
                 // Setup server with endpoints
-                let mut server = hyperware_app_common::setup_server(ui_config.as_ref(), &endpoints);
-                hyperware_app_common::APP_HELPERS.with(|ctx| {
+                let mut server = hyperware_process_lib::hyperapp::setup_server(ui_config.as_ref(), &endpoints);
+                hyperware_process_lib::hyperapp::APP_HELPERS.with(|ctx| {
                     ctx.borrow_mut().current_server = Some(&mut server);
                 });
 
@@ -1722,19 +1722,19 @@ fn generate_component_impl(
 
                 // Main event loop
                 loop {
-                    hyperware_app_common::APP_CONTEXT.with(|ctx| {
+                    hyperware_process_lib::hyperapp::APP_CONTEXT.with(|ctx| {
                         ctx.borrow_mut().executor.poll_all_tasks();
                     });
 
                     match hyperware_process_lib::await_message() {
                         Ok(message) => {
-                            hyperware_app_common::APP_HELPERS.with(|ctx| {
+                            hyperware_process_lib::hyperapp::APP_HELPERS.with(|ctx| {
                                 ctx.borrow_mut().current_message = Some(message.clone());
                             });
 
                             // Store old state if needed (for OnDiff save option)
                             // This only stores if old_state is None (first time or after a save)
-                            hyperware_app_common::store_old_state(&state);
+                            hyperware_process_lib::hyperapp::store_old_state(&state);
 
                             match message {
                                 hyperware_process_lib::Message::Response { body, context, .. } => {
@@ -1743,7 +1743,7 @@ fn generate_component_impl(
                                         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
                                         .unwrap_or_else(|| "no context".to_string());
 
-                                    hyperware_app_common::RESPONSE_REGISTRY.with(|registry| {
+                                    hyperware_process_lib::hyperapp::RESPONSE_REGISTRY.with(|registry| {
                                         let mut registry_mut = registry.borrow_mut();
                                         registry_mut.insert(correlation_id, body);
                                     });
@@ -1768,7 +1768,7 @@ fn generate_component_impl(
                                 let correlation_id = String::from_utf8_lossy(context)
                                     .to_string();
 
-                                hyperware_app_common::RESPONSE_REGISTRY.with(|registry| {
+                                hyperware_process_lib::hyperapp::RESPONSE_REGISTRY.with(|registry| {
                                     let mut registry_mut = registry.borrow_mut();
                                     registry_mut.insert(correlation_id, serde_json::to_vec(error).unwrap());
                                 });

@@ -11,7 +11,7 @@ proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits"] }
 
-hyperware_process_lib = { git = "https://github.com/hyperware-ai/process_lib", features = ["hyperapp", "logging"], rev = "604edfd" }
+hyperware_process_lib = { git = "https://github.com/hyperware-ai/process_lib", features = ["hyperapp", "logging"], rev = "11d23b2" }
 #process_macros = "0.1.0"
 #serde = { version = "1.0", features = ["derive"] }
 #serde_json = "1.0"

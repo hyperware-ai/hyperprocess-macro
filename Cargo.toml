@@ -11,4 +11,4 @@ proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits"] }
 
-hyperware_process_lib = { git = "https://github.com/hyperware-ai/process_lib", features = ["hyperapp", "logging"], rev = "b07c8a0" }
+hyperware_process_lib = { git = "https://github.com/hyperware-ai/process_lib", features = ["hyperapp", "logging"], rev = "108543b" }
